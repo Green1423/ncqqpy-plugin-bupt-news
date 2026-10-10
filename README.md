@@ -2,7 +2,7 @@
 
 定时同步北邮校内通知（门户登录 + AI 摘要 + 表格/图片处理），按配置推送到指定群与私聊。
 
-这是 [ncqqpy](https://github.com/<you>/ncqqpy) 的插件，**独立仓库**：
+这是 [ncqqpy](https://github.com/Green1423/ncqqpy) 的插件，**独立仓库**：
 框架按 `plugin_dir`（默认 `./plugins`）扫描子目录加载插件，所以把它 clone 到
 框架的 `plugins/` 下即可。
 
@@ -10,12 +10,12 @@
 
 ```bash
 cd /path/to/ncqqpy
-git clone https://github.com/<you>/ncqqpy-plugin-bupt-news plugins/bupt_news
+git clone https://github.com/Green1423/ncqqpy-plugin-bupt-news plugins/bupt_news
 # 重新加载（QQ 内，超级用户 · 仅私聊）
 #   /reload bupt_news
 ```
 
-要求：框架 [ncqqpy](https://github.com/<you>/ncqqpy)（`napcat` 包需可导入）。
+要求：框架 [ncqqpy](https://github.com/Green1423/ncqqpy)（`napcat` 包需可导入）。
 
 ## 配置
 
