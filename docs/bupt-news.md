@@ -755,7 +755,7 @@ NapCat 的 WS 服务端（`/opt/ncqq/napcat/config/onebot11_<QQ>.json`）：
 ]
 ```
 
-→ napcat-py 的 `config.json` 必须对应为：
+→ ncqqpy 的 `config.json` 必须对应为：
 
 ```json
 "ws_url": "ws://localhost:3001",
