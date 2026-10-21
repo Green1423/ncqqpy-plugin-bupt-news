@@ -88,6 +88,8 @@
     /buptnews del [group|user] [号]      移除目标
     /buptnews on | off        开关推送
     /buptnews interval [时长] 设置间隔，如 10m / 600
+    /buptnews search <关键词> [每页] [页码] [日期]   本地库 + 信息门户
+    /buptnews pin|unpin [编号 ...]                 置顶（持久化在 state.json）
     /buptnews images [stats|backfill|download|retry] [数量]
                               图片缓存：统计 / 补齐历史图片 / 只下图片 / 重试失败的下载
     /buptnews bind [user|group] <号> [list|add|del]
@@ -2259,8 +2261,10 @@ class BuptNewsPlugin(PluginBase):
                 scope.append(f"本地 {local_total} 条")
             if portal is not None:
                 scope.append(f"门户 {portal.get('total', 0)} 条")
-            lines.append(f"🔍 「{kw}」" + ("／".join(scope) if scope else "")
-                         + f"（第 {page} 页 · 每页 {size}）")
+            total_hint = local_total + (portal.get("total", 0) if portal else 0)
+            lines.append(f"🔍 「{kw}」命中 {total_hint} 条"
+                         + (f"（{'／'.join(scope)}）" if scope else "")
+                         + f"· 第 {page} 页 · 每页 {size}")
             lines.append("")
 
             if local_hits:
