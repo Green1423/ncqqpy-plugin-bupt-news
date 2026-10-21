@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -191,6 +192,84 @@ def parse_list(html: str, column, base: str = PORTAL) -> list[Notice]:
             )
         )
     return notices
+
+
+# 门户检索结果页：每条是 `<tr><li>链接+标题+点击数</li><td>日期</td></tr>`，
+# 日期在 <li> **外面**，所以不能直接复用 parse_list（那里按 <li> 取时间）。
+_SEARCH_ROW_RE = re.compile(r"<tr\b[^>]*>(?:(?!</tr>).)*?</tr>", re.S | re.I)
+_SEARCH_TOTAL_RE = re.compile(r"共\s*(\d+)\s*条")
+_SEARCH_PAGE_PARAM = "a218493p"      # Word 风格的私有分页参数（页面自报）
+_SEARCH_TOTAL_PARAM = "a218493t"
+_SEARCH_PAGE_SIZE_PARAM = "a218493c"
+
+
+def parse_search_total(html: str) -> int:
+    """检索结果页的「共 N 条」；取不到返回 0。"""
+    m = _SEARCH_TOTAL_RE.search(html or "")
+    try:
+        return int(m.group(1)) if m else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def parse_search_results(html: str, base: str = PORTAL) -> list[Notice]:
+    """解析 fz_ssjg.jsp 的检索结果。
+
+    与 `parse_list` 的差别：日期是同一 `<tr>` 里独立的 `<td>`，不在 `<li>` 内；
+    链接也可能是**绝对地址**（门户会把同一通知挂到 mymob 等子站）。
+    """
+    notices: list[Notice] = []
+    seen: set[str] = set()
+    for row in _SEARCH_ROW_RE.findall(html or ""):
+        m = _A_RE.search(row)
+        if not m:
+            continue
+        attrs, inner = m.group(1), m.group(2)
+        hm = _HREF_RE.search(attrs)
+        if not hm:
+            continue
+        href = unescape(hm.group(1))
+        q = parse_qs(urlparse(href).query)
+        newsid = (q.get("wbnewsid") or [""])[0]
+        treeid = (q.get("wbtreeid") or [""])[0]
+        if not newsid:
+            continue
+        key = f"{treeid}:{newsid}"
+        if key in seen:
+            continue
+        seen.add(key)
+
+        tm = _TITLE_RE.search(attrs)
+        title = unescape(tm.group(1)).strip() if tm else _text(inner)
+        if not title:
+            continue
+        # 日期取该行里最后一个 YYYY-MM-DD（点击数之类的数字不会误命中）
+        dates = re.findall(r"20\d{2}-\d{2}-\d{2}", row)
+        notices.append(Notice(
+            column=treeid or "",
+            newsid=newsid,
+            treeid=treeid,
+            title=title,
+            date=dates[-1] if dates else "",
+            url=urljoin(base + "/", href),
+        ))
+    return notices
+
+
+def _search_form(html: str, column) -> dict:
+    """从栏目列表页里抄出检索表单的 `wbtreeids`（栏目树 id 列表）。
+
+    写死树 id 会在门户调整栏目时静默漏结果，所以每次从页面读。
+    找不到时返回空串 —— 服务端会退回"全站检索"。
+    """
+    m = re.search(
+        r'<form[^>]+action="fz_ssjg\.jsp[^"]*"[^>]*>(.*?)</form>',
+        html or "", re.S | re.I)
+    if not m:
+        return {"treeids": ""}
+    tm = re.search(r"name=['\"]wbtreeids['\"][^>]*value=['\"]?([^'\">]*)",
+                   m.group(1), re.I)
+    return {"treeids": (tm.group(1).strip() if tm else "")}
 
 
 class _ContentExtractor(HTMLParser):
@@ -677,6 +756,65 @@ class PortalClient:
                     known.add(n.key)
             await asyncio.sleep(0.3)
         return notices
+
+    async def search(self, keyword: str, *, page: int = 1, page_size: int = 10,
+                     content: bool = True, column: str = "1154") -> dict:
+        """在信息门户里检索通知，返回 `{total, page, pages, size, items}`。
+
+        门户检索（`fz_ssjg.jsp`）的协议要点（都是逆向页面得来的，改动前先核对）：
+
+        * 提交走 **POST**：`INTEXT2` 是关键词的 **base64**，`Find=find`、
+          `entrymode=2`、`wbnewsfield` 选标题(`wbtitle`)/全文(`wbcontent`)；
+        * `wbtreeids` 是栏目树 id 列表，**必须**先从列表页的表单里抄过来
+          （写死会漏栏目，门户调整栏目时也会静默失效）；
+        * 翻页不能用 POST（服务端只认页面自报的私有参数），必须走 GET：
+          `?wbtreeid=..&wbnewsfield=..&Find=find&entrymode=2&a218493i=<kw>`
+          `&a218493c=<每页>&a218493p=<页码>&a218493t=<总页数>`；
+        * 每页条数由 `a218493c` 决定，但**服务端最多给 10 条**。
+
+        ⚠️ 实测无验证码（`NewsSearchDWR.isSearch` 那条链路是给浏览器用的），
+        空 `news_search_code` 也能拿到结果 —— 但门户随时可能加闸，失败要能降级。
+        """
+        kw = (keyword or "").strip()
+        if not kw:
+            return {"total": 0, "page": 1, "pages": 0, "size": int(page_size), "items": []}
+        page = max(1, int(page or 1))
+        size = max(1, min(int(page_size or 10), 10))     # 服务端上限 10
+        field = "wbcontent" if content else "wbtitle"
+
+        if page == 1:
+            # 首页：POST（顺带拿到总条数）
+            html, _ = await self._get(PORTAL + "/list.jsp",
+                                      params={"urltype": "tree.TreeTempUrl",
+                                              "wbtreeid": str(column)})
+            form = _search_form(html, column)
+            b64 = base64.b64encode(kw.encode("utf-8")).decode("ascii")
+            payload = {"wbnewsfield": field, "Find": "find", "entrymode": "2",
+                       "INTEXT2": b64, "news_search_code": "",
+                       "wbtreeids": form["treeids"]}
+            session = await self._ensure_session()
+            async with session.post(
+                    f"{PORTAL}/fz_ssjg.jsp?wbtreeid={int(column)}",
+                    data=payload) as resp:
+                body = await resp.text()
+        else:
+            # 翻页：GET（参数见上面说明）。
+            # `a218493t` 只是页面用来算"后面还有几页"的总页数；给一个足够大的值
+            # 不会导致越界（服务端按页码取数据），所以不必为了它再发一次首页请求。
+            params = {"wbtreeid": str(column), "wbnewsfield": field,
+                      "Find": "find", "entrymode": "2",
+                      "a218493i": kw, _SEARCH_PAGE_SIZE_PARAM: str(size),
+                      _SEARCH_PAGE_PARAM: str(page),
+                      _SEARCH_TOTAL_PARAM: "999"}
+            body, _ = await self._get(PORTAL + "/fz_ssjg.jsp", params=params)
+
+        items = parse_search_results(body)
+        total = parse_search_total(body)
+        if page == 1 and not total:
+            total = len(items)
+        pages = max(1, -(-total // size)) if total else (1 if items else 0)
+        return {"total": total, "page": page, "pages": pages, "size": size,
+                "items": items}
 
     async def fetch_detail(self, url: str) -> dict:
         html, _ = await self._get(url)

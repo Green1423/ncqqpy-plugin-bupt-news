@@ -630,11 +630,12 @@ async def main(online: bool) -> int:
     parent = cmds.list_commands().get("buptnews")
     subs = set(parent.subcommands.keys()) if parent else set()
     for expect in ("status", "list", "get", "targets", "add", "del",
-                   "on", "off", "interval", "sync", "images", "bind"):
+                   "on", "off", "interval", "sync", "images", "bind",
+                   "search", "pin", "unpin"):
         check(f"子命令已注册 {expect}", expect in subs, str(sorted(subs)))
     check("子命令未占用顶层命名空间",
           not any(n.startswith("buptnews.") for n in names), str(sorted(names)))
-    check("子命令挂在父命令下", parent is not None and len(parent.subcommands) == 12,
+    check("子命令挂在父命令下", parent is not None and len(parent.subcommands) == 15,
           str(sorted(parent.subcommands)) if parent else "no parent")
 
     check("定时任务已注册", "bupt_news.sync" in timer._metas, str(list(timer._metas)))
@@ -2060,7 +2061,10 @@ async def main(online: bool) -> int:
     check("list：导航行含上一页/下一页/末页提示之一",
           any(k in lp1 for k in ("⬅️ 上一页", "➡️ 下一页", "✅ 已是最后一页")),
           lp1[-80:])
-    check("list：结尾有 💡 用法提示", lp1.rstrip().endswith("查看全文"), lp1[-60:])
+    check("list：结尾有 💡 用法提示",
+          "查看全文" in lp1.rstrip().splitlines()[-1]
+          and "search" in lp1.rstrip().splitlines()[-1],
+          lp1[-80:])
     lp2 = await run_img_cmd("/buptnews list 2")
     check("list：末页同时给上一页与末页标记",
           "⬅️ 上一页" in lp2 and "✅ 已是最后一页" in lp2, lp2[-90:])

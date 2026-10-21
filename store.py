@@ -32,6 +32,11 @@ class StateStore:
             "lastSync": None,
             "lastDigestDate": None,
             "pushedCount": 0,     # 累计推送条数（统计用）
+            # 置顶的通知 id（按置顶时间顺序，最近的在后）。
+            # 放在 state.json 而不是 notices.jsonl：置顶是"用户选择"这类小状态，
+            # 且必须比正文记录活得久（记录被 retention 淘汰后置顶标记也要能清理，
+            # 见 _prune_pins）。空列表是合法值，不影响旧文件加载。
+            "pins": [],
         }
         self._index: dict[str, set] = {}
         self._pushed: set[str] = set()
@@ -76,6 +81,7 @@ class StateStore:
         self._rebuild_index()
         self._load_notices()
         self._reconcile_id_counter()
+        self._prune_pins()
 
     def save(self) -> None:
         d = os.path.dirname(self.state_path)
@@ -205,6 +211,116 @@ class StateStore:
 
     def notice_count(self) -> int:
         return len(self._notices)
+
+    # ---------------- 置顶 ----------------
+
+    def _prune_pins(self) -> int:
+        """丢掉已不存在的通知的置顶标记（记录被 retention 淘汰后）。
+
+        返回清理条数。不在这里落盘：由调用方按需 save()，避免加载路径产生写盘。
+        """
+        pins = self._data.get("pins")
+        if not isinstance(pins, list):
+            self._data["pins"] = []
+            return 0
+        keep: list[int] = []
+        seen: set[int] = set()
+        for v in pins:
+            try:
+                nid = int(v)
+            except (TypeError, ValueError):
+                continue
+            if nid in seen or nid not in self._notices:
+                continue
+            seen.add(nid)
+            keep.append(nid)
+        dropped = len(pins) - len(keep)
+        self._data["pins"] = keep
+        return dropped
+
+    def pinned_ids(self, newest_first: bool = False) -> list[int]:
+        """置顶的通知 id（按置顶顺序，最近的在后）。"""
+        ids = [int(v) for v in (self._data.get("pins") or [])
+               if isinstance(v, int) or str(v).lstrip("-").isdigit()]
+        return list(reversed(ids)) if newest_first else ids
+
+    def is_pinned(self, nid) -> bool:
+        try:
+            return int(nid) in {int(v) for v in (self._data.get("pins") or [])}
+        except (TypeError, ValueError):
+            return False
+
+    @property
+    def pin_count(self) -> int:
+        return len(self._data.get("pins") or [])
+
+    def pin(self, nid) -> bool:
+        """置顶一条通知；不存在或已置顶返回 False。立即落盘（置顶必须持久化）。"""
+        try:
+            nid = int(nid)
+        except (TypeError, ValueError):
+            return False
+        if nid not in self._notices or self.is_pinned(nid):
+            return False
+        self._data.setdefault("pins", []).append(nid)
+        self.save()
+        return True
+
+    def unpin(self, nid) -> bool:
+        """取消置顶；本来就没置顶返回 False。立即落盘。"""
+        try:
+            nid = int(nid)
+        except (TypeError, ValueError):
+            return False
+        pins = self._data.get("pins") or []
+        if nid not in pins:
+            return False
+        self._data["pins"] = [v for v in pins if int(v) != nid]
+        self.save()
+        return True
+
+    def clear_pins(self) -> int:
+        """清空所有置顶，返回清掉的条数。立即落盘。"""
+        n = len(self._data.get("pins") or [])
+        if n:
+            self._data["pins"] = []
+            self.save()
+        return n
+
+    def prune_pins(self) -> int:
+        """清理失效置顶并落盘（供插件在同步后调用）。"""
+        dropped = self._prune_pins()
+        if dropped:
+            self.save()
+        return dropped
+
+    # ---------------- 检索 ----------------
+
+    def search(self, keyword: str, *, limit: int = 10, page: int = 1,
+               date: str = "") -> tuple[list[dict], int]:
+        """按关键词检索通知，返回 `(当页记录, 命中总数)`（最新在前）。
+
+        匹配范围：标题、AI 摘要、正文、发布单位、通知编号。
+        `date` 非空时只保留该日期（`YYYY-MM-DD`，与记录里的 `date` 同格式）。
+        关键词按**子串**匹配且不区分大小写（中文没有词边界，分词反而会漏）。
+        """
+        kw = (keyword or "").strip().lower()
+        if not kw:
+            return [], 0
+        date = (date or "").strip()
+        hits: list[dict] = []
+        for rec in self.all_records():          # 已按 id 升序
+            if date and str(rec.get("date") or "")[:10] != date:
+                continue
+            haystack = "\n".join(str(rec.get(k) or "") for k in
+                                 ("title", "summary", "body", "dept", "newsid"))
+            if kw in haystack.lower():
+                hits.append(rec)
+        hits.reverse()                          # 最新在前
+        total = len(hits)
+        size = max(1, int(limit or 10))
+        start = max(0, (max(1, int(page or 1)) - 1) * size)
+        return hits[start:start + size], total
 
     # ---------------- seen / pushed ----------------
 
