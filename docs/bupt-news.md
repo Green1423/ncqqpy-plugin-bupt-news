@@ -113,8 +113,7 @@ plugins/bupt_news/
 | `interval` | `600` | 同步间隔（秒），最小 60 |
 | `enabled` | `true` | 推送总开关；`false` 时仍同步落库但不发送，**重新开启后会补发**（与免打扰同一套积压机制）|
 | `columns` | `[1154]` | 栏目 `wbtreeid`，1154=校内通知，1305=公示公告，1221=校内新闻 … |
-| `groups` | `[]` | 推送目标群号 |
-| `users` | `[]` | 推送目标 QQ 号 |
+| `targets` | `{groups:{}, users:{}}` | **绑定表**（唯一来源）：一项 = 一个群/用户 + `message`（推通知）/ `event`（推活动）/ `token_file`。在表里即**准入**。用 `/buptnews add\|set\|del` 维护；旧的 `groups`/`users`/`binding`/`afterclass.bindings` 仍能自动合成，但会被 `targets` 取代 |
 | `quiet_hours` | `{start:"23:00", end:"07:00"}` | 免打扰窗口，支持跨午夜；同日窗口（如 01:00–06:00）也支持 |
 | `weather` | `{enabled,label,latitude,longitude,timeout,umbrella_pop}` | Open-Meteo 天气（免 key）；`umbrella_pop` 默认 50 = 降水概率达 50% 就提醒带伞 |
 | `summarize` | `{enabled,base_url,model,api_key,batch_size,max_tokens,timeout,reasoning_effort,retry,retry_delay,retry_on_notice,retry_scan_max,retry_cooldown,retry_timeout,retry_batch_size,push_budget,retry_budget}` | DeepSeek 摘要；`batch_size` 默认 3，`max_tokens` 默认 4096；失败重试见 [§8.5 AI 摘要重试](#85-ai-摘要重试与时间预算) |
@@ -128,7 +127,7 @@ plugins/bupt_news/
 | `images` | `{enabled:true, max_bytes:10485760, prefetch:true, prefetch_max:30, recrawl:true, recrawl_max:50, retry:2, retry_delay:2.0, max_attempts:5}` | **正文图片**：抓正文时记录每张图及其在正文中的位置，`get` 时按原排版插入。`max_bytes` = 单张上限（超限跳过）；`prefetch` = 同步时补齐图片缓存（本轮新通知优先，随后是**所有保留记录**里仍缺的图），`prefetch_max` = 单轮下载上限；`recrawl` = 给「没有 `images` 字段」的历史记录重抓正文页补图（每轮 `recrawl_max` 条，0 = 不限，都没补完的下一轮继续）；`retry`/`retry_delay` = 下载失败后**立刻重试**的次数与起始间隔（指数递增），`max_attempts` = 累计失败多少次后停止自动重试（失败次数记在 `data/image_failures.json`，命令可强制重试）；`enabled:false` 退化为纯文本 |
 | `tables` | `{enabled:true, max_per_notice:5}` | **正文表格 → 图片**：门户正文里的表格被提取器**拍平成文本**（每个单元格一行，行列关系全丢），所以表格单独用 Chromium 渲染成 PNG 发送。`max_per_notice` = 单条最多渲染几个表（按原文顺序取前 N 个）；`enabled:false` 或不装 Chromium 时退回文本形式。图片按**表格内容哈希**缓存在 `data/tables/`，同表只渲染一次 |
 | `chunk` | `{max_chars:1200, max_images:4}` | **长消息分段**：单条消息超过该配额就拆成多条按序发送（`get` / 推送 / 早报都适用）。0 = 该维度不限 |
-| `binding` | `{groups:[], users:[]}` | **私聊可用范围**：谁能私聊（含群小窗）用命令。`groups` = 允许在**群聊临时会话（小窗）**里用命令的来源群，留空则沿用框架的 `bound_groups`（谁被监听就允许谁的小窗）；`users` = 允许**直接私聊**用命令的 QQ 号。两者都空 = 非超级用户私聊一律不服务（含 `get`）。群聊内不受影响；超级用户豁免。用 `/buptnews bind user\|group <号>` 增删，详见 [§4.2](#42-私聊可用范围binding-两道闸门别混为一谈) |
+| ~~`binding`~~ | — | **已合并进 `targets`**（绑定即准入）。旧键仍兼容读取，但新逻辑只写 `targets` |
 | `username` | — | 门户账号（学号/工号）|
 | `password` | `""` | 门户密码（建议改用环境变量）|
 | ~~`push_body`~~ | — | **已退役**：推送不再携带正文，正文恒被抓取落库以供 `get` 查询。键名保留但被忽略 |
@@ -170,14 +169,17 @@ cp .env.example .env      # 填 BUPT_PORTAL_PASSWORD 与 DEEPSEEK_API_KEY
 | `/buptnews search <关键词> [每页] [页码] [日期]` | 仅私聊 | 无 | **搜索本地库 + 信息门户**。本地：标题/摘要/正文/单位/编号（子串、不区分大小写）；门户：标题或全文（`--content=false` 只搜标题，走门户自己的检索）。`--source=local\|portal` 可只搜一侧 |
 | `/buptnews pin [编号\|E编号 ...] [force]` | 仅私聊 | **superuser** | 置顶通知（钉在 `list` 顶部，**每页都显示**）；可多个（`pin 12 34` / `pin 12,E1759-142679`）；不带参数=查看当前置顶。每条置顶分配**独立编号 P1/P2…**。**上限 `pin_limit`（默认 3）**：满了会拒绝并提示；加 `--force`（或 `-f`）才替换**最早置顶**的那条。**持久化在 `state.json` 的 `pins`** |
 | `/buptnews unpin [P编号\|编号\|E编号 ...]` | 仅私聊 | **superuser** | 取消置顶（`unpin P2` 摘掉第 2 个置顶项）；不带参数=清空全部 |
-| `/buptnews targets` | 仅私聊 | **superuser** | 查看推送目标 |
+| `/buptnews targets` | 仅私聊 | **superuser** | 查看绑定表（准入 + 通知/活动开关） |
 | `/buptnews sync [页数] [preview]` | 私聊 / 群聊 | admin | 立即同步；`preview` 只私聊发给自己，用于验证链路 |
-| `/buptnews add group\|user [号]` | 仅私聊 | **superuser** | 添加目标 |
-| `/buptnews del group\|user [号]` | 仅私聊 | **superuser** | 移除目标 |
+| `/buptnews add group\|user <号> [message=on\|off] [event=on\|off]` | 仅私聊 | **superuser** | **绑定**目标（合并了原 `bind` 与 `add`）：在表里即可私聊/小窗用命令，`message` 决定推不推通知（默认开），`event` 决定推不推活动（默认关） |
+| `/buptnews set group\|user <号> [message=] [event=]` | 仅私聊 | **superuser** | 只改开关，没给的保持不变 |
+| `/buptnews del group\|user <号>` | 仅私聊 | **superuser** | 移除绑定（连带删掉数据目录里的 token） |
+| `/buptnews dektoken user <JWT>` | 仅私聊 | 公开（命令内判定） | 设置**自己**的第二课堂 token；要求自己已 `event=on`，且 JWT 的 `sub` 必须是自己 |
+| `/buptnews dektoken group <群号> <JWT>` | 仅私聊 | 公开（命令内判定） | 设置某个群的 token；要求该群已 `event=on`，且调用者是**群主/管理员** |
 | `/buptnews on` / `/buptnews off` | 仅私聊 | **superuser** | 开关推送 |
 | `/buptnews interval <时长>` | 仅私聊 | **superuser** | 设置间隔，支持 `600` / `10m` / `1h` |
 | `/buptnews images [stats\|backfill\|download\|retry] [数量]` | 仅私聊 | **superuser** | 图片缓存：`stats`（默认）看缓存、待补数量与失败待重试；`backfill` 重抓历史记录补图并下载；`download` 只下载缺失的图；`retry` 重试之前下载失败的图（忽略次数上限）。数量 0 = 用配置上限（`recrawl_max` / `prefetch_max`）|
-| `/buptnews bind [user\|group] [号] [add\|del\|list]` | 仅私聊 | **superuser** | 私聊可用范围白名单：加/删允许私聊（或开小窗）的用户与群，省略号数只看现状。**与 `add`（推送目标）是两件事**：那个管「往哪发」，这个管「谁能用」|
+
 
 > 每条子命令都**显式声明** `permission=`：`permission=""`（`list` / `get`）表示显式覆盖、
 > 无权限限制；父命令自己的 `permission="admin"` **只作为未声明时的默认值**（当前没有子命令
@@ -742,28 +744,24 @@ export DEKT_TOKEN='<JWT>'
 ./venv-arm/bin/python -B tools/dekt_probe.py --json   # 附带原始字段名
 ```
 
-确认无碍后开启：
+确认无碍后开启（`"afterclass": {"enabled": true}`），再**用命令绑定**：
 
-```json
-"afterclass": {
-  "enabled": true,
-  "base": "https://dekt.bupt.edu.cn",
-  "max_per_round": 5,
-  "max_records": 300,
-  "bindings": [
-    {"group": 100000003, "token_file": "afterclass/token.txt", "name": "某班"},
-    {"user":  10000001,  "token_file": "afterclass/tokens/u10000001.txt"}
-  ]
-}
+```
+/buptnews add group 100000003 event=on      # 绑定并开启活动推送
+/buptnews dektoken group 100000003 <JWT>    # 群主/管理员设置该群 token
+/buptnews add user 10000001 event=on        # 绑定用户
+/buptnews dektoken user <JWT>               # 该用户设置自己的 token
+/buptnews set user 10000001 message=off     # 只改开关
 ```
 
 **独立绑定**：一项 = **一个推送目标 + 它自己的 JWT**。
 
-- `group` / `user` 二选一（同时给或都不给会被跳过并告警）；
-- 省略 `token_file` 时默认 `afterclass/tokens/<group|user>-<号>.txt`；
+- 绑定存 `targets`；token 默认落**数据目录** `data/dekt-tokens/<group|user>-<号>.txt`
+  （权限 `0600`，不写进源码目录）；
 - 每个绑定**单独**去重、单独存活动（`data/activities/<group|user>-<号>.json`）、
   单独计单轮上限、单独容忍 token 过期 —— 一个坏掉不影响其它；
-- 活动**只发给该绑定的目标**，不走通知的 `groups`/`users`，也**绝不 @全体成员**。
+- 活动**只发给该绑定的目标**，不走通知的目标列表，也**绝不 @全体成员**；
+- `dektoken` 写完**立即生效**（重建绑定 + 重读 token），不用重启。
 
 为什么必须各自一份 JWT：`/api/v1/activity` 的返回是**按账号**算的
 （`college_id` / `class_id` / `grade` / `role_id` 都来自 token 对应的人）。
@@ -806,7 +804,8 @@ belong_to, target_id, target_role, grade, priority, picture_url, digest
 活动区按时间倒序、多绑定时标出归属（`[某班] 13452 10-26 15:00 …`），
 只显示最新 `list_page_size` 条并说明总数。
 
-**续期不用重启**：token 每轮同步都会重读文件，覆盖 `afterclass/token.txt` 即生效。
+**续期不用重启**：`dektoken` 写完立即生效；也可以直接覆盖对应 token 文件，
+每轮同步都会重读（内容变了就重建会话）。
 JWT 的 `exp` 会被解出来，**剩余不足 3 天开始每天提醒一次**，过期后日志给出具体动作
 （`/buptnews status` 也能看到 `token 至 YYYY-MM-DD`）。
 

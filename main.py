@@ -559,8 +559,7 @@ class BuptNewsPlugin(PluginBase):
         if self._summarizer is not None and not self._summarizer.enabled:
             self.logger.warning(
                 "[bupt_news] 未配置 DEEPSEEK_API_KEY，摘要将降级为标题截断")
-        groups = self._int_list("groups")
-        users = self._int_list("users")
+        groups, users = self._message_targets()
         if not self._credentials()[1]:
             self.logger.warning(
                 "[bupt_news] 未配置门户密码：请设置 config.json 的 "
@@ -671,23 +670,32 @@ class BuptNewsPlugin(PluginBase):
                     if tid <= 0:            # QQ 号/群号必须为正
                         continue
                     spec = v if isinstance(v, dict) else {}
+                    try:
+                        token_by = int(spec.get("token_by") or 0)
+                    except (TypeError, ValueError):
+                        token_by = 0
                     out[key][tid] = {
                         "message": bool(spec.get("message", True)),
                         "event": bool(spec.get("event", False)),
                         "token_file": str(spec.get("token_file") or ""),
+                        # 谁设置的 token —— 过期时通知**这个人**（群 token 尤其需要：
+                        # 群里只有他一个人有账号，别人想续期得先删掉重设）
+                        "token_by": token_by,
                     }
             return out
 
         # ---- 旧配置兜底 ----
         for key in ("groups", "users"):
             for tid in self._int_list(key):          # 推送目标 → 推通知
-                out[key][tid] = {"message": True, "event": False, "token_file": ""}
+                out[key][tid] = {"message": True, "event": False,
+                                 "token_file": "", "token_by": 0}
         legacy = self.config.get("binding")
         if isinstance(legacy, dict):
             for key in ("groups", "users"):
                 for tid in self._to_ids(legacy.get(key)):   # 白名单 → 只准入
                     out[key].setdefault(
-                        tid, {"message": False, "event": False, "token_file": ""})
+                        tid, {"message": False, "event": False,
+                              "token_file": "", "token_by": 0})
         ac = self.config.get("afterclass") or {}
         for item in ac.get("bindings") or []:
             if not isinstance(item, dict):
@@ -702,7 +710,8 @@ class BuptNewsPlugin(PluginBase):
             except (TypeError, ValueError):
                 continue
             spec = out[key].setdefault(
-                tid, {"message": False, "event": False, "token_file": ""})
+                tid, {"message": False, "event": False,
+                      "token_file": "", "token_by": 0})
             spec["event"] = True
             if item.get("token_file"):
                 spec["token_file"] = str(item["token_file"])
@@ -717,6 +726,8 @@ class BuptNewsPlugin(PluginBase):
                          "event": bool(spec.get("event", False))}
                 if spec.get("token_file"):
                     entry["token_file"] = str(spec["token_file"])
+                if spec.get("token_by"):
+                    entry["token_by"] = int(spec["token_by"])
                 payload[key][str(int(tid))] = entry
         self.config.set("targets", payload)
 
@@ -1118,11 +1129,11 @@ class BuptNewsPlugin(PluginBase):
         await self._backfill_ai_results()
         return (len(pending), sent, failed)
 
-    def _warn_token_expiry(self) -> None:
-        """按绑定检查 token 过期，**每个绑定每天最多提醒一次**。
+    async def _warn_token_expiry(self) -> None:
+        """token 快过期/已过期时**私聊通知设置它的人**（每个绑定每天一次）。
 
-        手动续期是这套流程里唯一必须人做的事，所以不能让它静默失效：
-        提前 3 天开始提醒，过期后说明具体动作（覆盖对应绑定自己的 token 文件即可）。
+        为什么必须通知到人：群里只有一个人能设置 token，别人想续期得先删掉重设；
+        过期后活动同步静默停摆，光记日志没人会看到。
         """
         today = self._today()
         warned = getattr(self, "_token_warn_dates", None)
@@ -1143,35 +1154,59 @@ class BuptNewsPlugin(PluginBase):
             if warned.get(key) == today:
                 continue
             warned[key] = today
+
+            kind, target = binding["kind"], binding["target"]
+            label = f"{'群' if kind == 'group' else '用户'} {target}"
+            # 通知谁：群里是"设置 token 的那位"，用户就是他自己
+            spec = self._target(kind, target) or {}
+            who = int(spec.get("token_by") or 0)
+            if not who and kind == "user":
+                who = int(target)
+            if not who:
+                # 历史 token 没记设置者（功能上线前写入的）→ 退给超管，
+                # 否则过期了没有任何人会被通知到。
+                who = sorted(getattr(self.perm, "_superusers", set()) or [])[0] \
+                    if getattr(self.perm, "_superusers", None) else 0
+            cmd = (f"/buptnews dektoken group {target} <JWT>" if kind == "group"
+                   else "/buptnews dektoken user <JWT>")
             if left <= 0:
                 self.logger.error(
-                    "[bupt_news] 第二课堂绑定「%s」的 token 已于 %s 过期，暂停拉取。"
-                    "重新登录后把新 JWT 写入 %s 即恢复（无需重启）",
-                    binding["name"], expiry.strftime("%Y-%m-%d %H:%M"),
-                    binding["token_file"])
+                    "[bupt_news] %s 的第二课堂 token 已于 %s 过期，活动同步暂停"
+                    "（设置者 %s）", label, expiry.strftime("%Y-%m-%d %H:%M"), who or "未知")
+                text = (f"❌ 第二课堂 token 已过期\n"
+                        f"{label} 的 token 在 {expiry:%Y-%m-%d %H:%M} 过期，"
+                        f"活动同步已暂停。\n"
+                        f"重新登录后发：{cmd}")
             else:
                 self.logger.warning(
-                    "[bupt_news] 第二课堂绑定「%s」的 token 将在 %s 过期（剩 %.1f 天），"
-                    "建议提前登录并把新 JWT 写入 %s",
-                    binding["name"], expiry.strftime("%Y-%m-%d %H:%M"),
-                    max(0.0, left / 86400), binding["token_file"])
+                    "[bupt_news] %s 的第二课堂 token 将在 %s 过期（剩 %.1f 天，设置者 %s）",
+                    label, expiry.strftime("%Y-%m-%d %H:%M"),
+                    max(0.0, left / 86400), who or "未知")
+                text = (f"⚠️ 第二课堂 token 即将过期\n"
+                        f"{label} 的 token 将在 {expiry:%Y-%m-%d %H:%M} 过期"
+                        f"（剩 {max(0.0, left / 86400):.1f} 天）。\n"
+                        f"续期后发：{cmd}")
+            if not who:
+                continue
+            try:
+                await self.api.send_private_msg(
+                    str(who), MessageChain().text(text))
+                self.logger.info("[bupt_news] 已私聊提醒 %s 续期第二课堂 token", who)
+            except Exception as e:  # noqa: BLE001 - 通知失败不影响同步
+                self.logger.warning("[bupt_news] 提醒 %s 续期失败：%s", who, e)
 
     # -------------------------------------------------- 第二课堂（独立绑定）
 
     def _binding_store_path(self, kind: str, target: int) -> str:
         """每个绑定一份活动文件：`data/activities/<group|user>-<号>.json`。
 
-        分开存的好处：不同账号看到的活动集合本来就不一样，
-        混在一个文件里既没法按绑定去重，也看不出某条活动是从哪个账号来的。
+        分开存：不同账号看到的活动集合本来就不一样，混在一个文件里既没法按绑定
+        去重，也看不出某条活动是哪个账号拉到的。
         """
         return os.path.join(self._data_dir, "activities", f"{kind}-{target}.json")
 
     def _build_activity_bindings(self, ac: dict, *, warn: bool = False) -> list:
-        """从配置构建绑定列表：一项 = 一个目标 + 它自己的 JWT。
-
-        配置写错（既没 group 也没 user、token 文件不存在等）只跳过该项并告警，
-        不能让一个配错的绑定把整个插件带崩。
-        """
+        """从 `targets` 里 `event=true` 的条目构建活动绑定（一项 = 目标 + 它自己的 JWT）。"""
         self._close_activity_bindings()
         out: list[dict] = []
         base = ac.get("base") or DEKT_BASE
@@ -1180,7 +1215,7 @@ class BuptNewsPlugin(PluginBase):
             token_file = self._token_path(kind, target, spec)
             name = f"{'群' if kind == 'group' else '用户'}{target}"
             client = DektClient(base=base, logger=self.logger,
-                               token_file=token_file)
+                                token_file=token_file)
             store = ActivityStore(self._binding_store_path(kind, target),
                                   max_records=max_records, logger=self.logger)
             out.append({"name": name, "kind": kind, "target": target,
@@ -1197,74 +1232,6 @@ class BuptNewsPlugin(PluginBase):
                 "再用 /buptnews dektoken user|group <JWT> 设置 token")
         self._act_bindings = out
         return out
-
-    _SWITCH_TRUE = {"on", "true", "1", "yes", "y", "是", "开"}
-    _SWITCH_FALSE = {"off", "false", "0", "no", "n", "否", "关"}
-
-    @classmethod
-    def _parse_switches(cls, tokens, allowed=("message", "event")
-                        ) -> tuple[dict, list[str]]:
-        """解析 `message=on event=off` 这类开关，返回 `({键: bool}, [错误])`。
-
-        同时接受 `key=value` / `key:value` / `--key=value`：框架只把 `--key=value`
-        交给 kwargs，其余会落到位置参数里，所以这里统一从原文 token 解析，
-        用户怎么写都不会莫名其妙报"必须为布尔值"。
-        """
-        out: dict[str, bool] = {}
-        errors: list[str] = []
-        for raw in tokens or []:
-            text = str(raw).strip().lstrip("-")
-            if "=" in text:
-                key, value = text.split("=", 1)
-            elif ":" in text:
-                key, value = text.split(":", 1)
-            else:
-                errors.append(f"`{raw}` 不是 key=value 形式"
-                              "（应写成 event=on / message=off）")
-                continue
-            key = key.strip().lower()
-            value = value.strip().lower()
-            if key not in allowed:
-                errors.append(f"未知开关 `{key}`（可用：{'、'.join(allowed)}）")
-                continue
-            if value in cls._SWITCH_TRUE:
-                out[key] = True
-            elif value in cls._SWITCH_FALSE:
-                out[key] = False
-            else:
-                errors.append(f"`{key}` 的值 `{value}` 认不出"
-                              "（用 on/off、是/否、1/0）")
-        return out, errors
-
-    def _token_path(self, kind: str, target: int, spec: dict | None = None) -> str:
-        """某个绑定的 token 文件路径。
-
-        显式配置优先（旧配置里的相对路径按插件目录解析）；
-        否则默认放**数据目录**下的 `dekt-tokens/<kind>-<号>.txt` ——
-        口令属于运行时数据，不该写进源码目录。
-        """
-        configured = str((spec or {}).get("token_file") or "").strip()
-        if configured:
-            if os.path.isabs(configured):
-                return configured
-            return os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), configured)
-        return os.path.join(self._data_dir, "dekt-tokens",
-                            f"{kind}-{int(target)}.txt")
-
-    def _write_token(self, kind: str, target: int, token: str) -> str:
-        """把 JWT 写进该绑定的 token 文件，返回路径。
-
-        权限收紧到 0600：这是登录凭据，同机其它用户不该读得到。
-        """
-        path = self._token_path(kind, target, self._target(kind, target))
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(clean_token(token))
-        os.replace(tmp, path)
-        return path
 
     def _close_activity_bindings(self) -> None:
         """关掉各绑定持有的 HTTP 会话（停用/重建时调用）。"""
@@ -1287,11 +1254,7 @@ class BuptNewsPlugin(PluginBase):
         return None
 
     def _refresh_activity_bindings(self) -> list:
-        """配置一变就重建活动绑定，**立即生效**（不用重启/等下一轮）。
-
-        `add`/`set`/`del`/`dektoken` 改完配置都会调它，所以"刚绑定完就能拉"，
-        不会出现"改完了但要等重启"的割裂感。
-        """
+        """配置一变就重建活动绑定，**立即生效**（不用重启/等下一轮）。"""
         ac = self.config.get("afterclass") or {}
         if not ac.get("enabled"):
             self._close_activity_bindings()
@@ -1304,10 +1267,10 @@ class BuptNewsPlugin(PluginBase):
             return getattr(self, "_act_bindings", []) or []
 
     async def _group_role_of(self, group_id: int, user_id: int) -> str:
-        """查某人在群里的身份（`owner` / `admin` / `member`；查不到返回空串）。
+        """查某人在群里的身份（`owner`/`admin`/`member`；查不到返回空串）。
 
-        `get_group_member_info` 依赖机器人**在那个群里**；机器人不在群时接口会失败，
-        这里按"查不到"处理（调用方据此拒绝），而不是当成有权限。
+        `get_group_member_info` 依赖机器人**在那个群里**；不在群时按"查不到"处理
+        （调用方据此拒绝），绝不猜成有权限。
         """
         getter = getattr(self.api, "get_group_member_info", None)
         if not callable(getter):
@@ -1346,14 +1309,104 @@ class BuptNewsPlugin(PluginBase):
         self.logger.info("[bupt_news] 已推送活动 → %s %s", kind, target)
         return sent
 
-    def _activity_list_lines(self, size: int) -> list[str]:
-        """`list --scope=acts|all` 的活动区：每个绑定的最新活动按时间倒序合并。
+    _SWITCH_TRUE = {"on", "true", "1", "yes", "y", "是", "开"}
+    _SWITCH_FALSE = {"off", "false", "0", "no", "n", "否", "关"}
 
-        与通知的编号分页无关（活动是外部 id），只显示最新 `size` 条并说明截断。
+    @classmethod
+    def _parse_switches(cls, tokens, allowed=("message", "event")
+                        ) -> tuple[dict, list[str]]:
+        """解析 `message=on event=off` 这类开关，返回 `({键: bool}, [错误])`。
+
+        同时接受 `key=value` / `key:value` / `--key=value`：框架只把 `--key=value`
+        交给 kwargs，其余会落到位置参数里，所以统一从原文 token 解析。
+        """
+        out: dict[str, bool] = {}
+        errors: list[str] = []
+        for raw in tokens or []:
+            text = str(raw).strip().lstrip("-")
+            if "=" in text:
+                key, value = text.split("=", 1)
+            elif ":" in text:
+                key, value = text.split(":", 1)
+            else:
+                errors.append(f"`{raw}` 不是 key=value 形式"
+                              "（应写成 event=on / message=off）")
+                continue
+            key = key.strip().lower()
+            value = value.strip().lower()
+            if key not in allowed:
+                errors.append(f"未知开关 `{key}`（可用：{'、'.join(allowed)}）")
+                continue
+            if value in cls._SWITCH_TRUE:
+                out[key] = True
+            elif value in cls._SWITCH_FALSE:
+                out[key] = False
+            else:
+                errors.append(f"`{key}` 的值 `{value}` 认不出"
+                              "（用 on/off、是/否、1/0）")
+        return out, errors
+
+    def _token_path(self, kind: str, target: int, spec: dict | None = None) -> str:
+        """某个绑定的 token 文件路径。
+
+        显式配置优先（旧配置里的相对路径按插件目录解析）；否则默认放**数据目录**
+        下的 `dekt-tokens/<kind>-<号>.txt` —— 口令属于运行时数据，不写进源码目录。
+        """
+        configured = str((spec or {}).get("token_file") or "").strip()
+        if configured:
+            if os.path.isabs(configured):
+                return configured
+            return os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), configured)
+        return os.path.join(self._data_dir, "dekt-tokens",
+                            f"{kind}-{int(target)}.txt")
+
+    @staticmethod
+    def _read_token_file(path: str) -> str:
+        try:
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+        except OSError:
+            return ""
+
+    def _has_token(self, spec: dict, kind: str, target: int) -> bool:
+        return bool(clean_token(self._read_token_file(
+            self._token_path(kind, target, spec))))
+
+    def _remove_token(self, kind: str, target: int, spec: dict) -> None:
+        """删除 token 文件并清掉配置记录（绑定保留，只是暂时没有 token）。"""
+        path = self._token_path(kind, target, spec)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        data = self._targets()
+        key = "groups" if kind == "group" else "users"
+        if target in data[key]:
+            data[key][target]["token_file"] = ""
+            data[key][target]["token_by"] = 0
+            self._save_targets(data)
+        self._refresh_activity_bindings()
+
+    def _write_token(self, kind: str, target: int, token: str) -> str:
+        """把 JWT 写进该绑定的 token 文件，返回路径（权限 0600：这是登录凭据）。"""
+        path = self._token_path(kind, target, self._target(kind, target))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(clean_token(token))
+        os.replace(tmp, path)
+        return path
+
+    def _activity_list_lines(self, size: int) -> list[str]:
+        """`list --scope=acts|all` 的活动区：各绑定的活动按时间倒序合并。
+
+        与通知的 `#编号` 分页无关（活动是外部 id），只显示最新 `size` 条并说明截断。
         """
         bindings = getattr(self, "_act_bindings", []) or []
         if not bindings:
-            return ["🎪 第二课堂：未配置绑定（afterclass.bindings）"]
+            return ["🎪 第二课堂：未配置绑定（用 add group|user <号> event=on）"]
         rows: list[tuple[float, str, dict]] = []
         for b in bindings:
             for rec in b["store"].all_records():
@@ -1406,7 +1459,7 @@ class BuptNewsPlugin(PluginBase):
         bindings = getattr(self, "_act_bindings", []) or []
         if not bindings:
             return (0, 0)
-        self._warn_token_expiry()
+        await self._warn_token_expiry()
         fresh_total = sent_total = 0
         for binding in bindings:
             try:
@@ -3338,7 +3391,8 @@ class BuptNewsPlugin(PluginBase):
             key = "groups" if kind == "group" else "users"
             existed = target in data[key]
             spec = data[key].setdefault(
-                target, {"message": False, "event": False, "token_file": ""})
+                target, {"message": False, "event": False,
+                         "token_file": "", "token_by": 0})
             # 新绑定默认：推通知、不推活动；已存在则**只改给了的开关**
             spec["message"] = switches.get("message", spec["message"]
                                            if existed else True)
@@ -3456,7 +3510,11 @@ class BuptNewsPlugin(PluginBase):
                     flags.append("通知" if spec["message"] else "不推通知")
                     if spec["event"]:
                         tok = self._token_path(kind, tid, spec)
-                        flags.append("活动" + ("" if os.path.exists(tok) else "⚠️缺token"))
+                        if os.path.exists(tok):
+                            by = int(spec.get("token_by") or 0)
+                            flags.append("活动" + (f"（{by} 设）" if by else ""))
+                        else:
+                            flags.append("活动⚠️缺token")
                     else:
                         flags.append("不推活动")
                     lines.append(f"  {tid}  " + " · ".join(flags))
@@ -3474,10 +3532,15 @@ class BuptNewsPlugin(PluginBase):
              schema=DektokenSchema, allow_unbound=True,
              description="设置第二课堂 JWT（user=自己 / group=需群管理）")
         async def cmd_dektoken(params, packet=None):
-            """给绑定设置 JWT。**非超管也能用**，所以权限在函数里逐条判定：
+            """给绑定设置/删除 JWT。**非超管也能用**，权限在函数里逐条判定。
 
-            * `user`：只能设自己，且必须已 `event=on` 绑定了自己；
-            * `group`：必须指定群号、该群已 `event=on`，且调用者是**群主/管理员**。
+            规则（与需求对齐）：
+
+            * `user`：只能设/删**自己**的，要求自己已 `event=on`；
+            * `group`：必须指定群号、该群已 `event=on`，且调用者是**群主/管理员**；
+            * **一个群只有一个人能设 token**：已由 A 设置时，别人必须先删除；
+              A 本人可以直接重设（续期不用先删）；
+            * **删除**：群主/管理员（或当初的设置者）可删；用户可删自己的。
             """
             kind = (params.kind or "user").lower()
             rest = [str(x) for x in (getattr(params, "rest", None) or [])]
@@ -3485,33 +3548,53 @@ class BuptNewsPlugin(PluginBase):
             uid = int(getattr(event, "user_id", 0) or 0)
             if not uid:
                 return "❓ 无法识别你的 QQ 号"
+            label = "群" if kind == "group" else "用户"
+
+            # `delete`（也收 删除/del）出现在 token 位 = 删除模式
+            is_delete = bool(rest) and rest[-1].lower() in ("delete", "del", "删除")
+            if is_delete:
+                rest = rest[:-1]
 
             if kind == "user":
-                if len(rest) != 1:
-                    return ("⚠️ 用法：/buptnews dektoken user <JWT>\n"
-                            "   （只能设置**你自己**的 token）")
-                target, token = uid, rest[0]
+                if kind == "user" and rest and not is_delete:
+                    if len(rest) != 1:
+                        return ("⚠️ 用法：/buptnews dektoken user <JWT>\n"
+                                "   删除：/buptnews dektoken user delete")
+                target = uid
                 spec = self._target("user", target)
                 if not spec:
-                    return ("⚠️ 你还没有绑定，不能设置 token。\n"
+                    return ("⚠️ 你还没有绑定，不能操作 token。\n"
                             f"💡 让管理员执行：/buptnews add user {target} event=on")
                 if not spec["event"]:
                     return ("⚠️ 你的绑定没有启用活动推送（event=off）。\n"
                             f"💡 让管理员执行：/buptnews set user {target} event=on")
-                # "仅能设置自己的"：光靠"只能用自己 QQ 号"不够 —— 粘别人的 token
-                # 同样会写进自己的绑定，必须核对 JWT 里的 sub。
+                if is_delete:
+                    if not spec.get("token_file") or not self._has_token(spec, "user", target):
+                        return "ℹ️ 你还没有设置过 token"
+                    self._remove_token("user", target, spec)
+                    return "✅ 已删除你的第二课堂 token，活动同步已暂停"
+                if len(rest) != 1:
+                    return ("⚠️ 用法：/buptnews dektoken user <JWT>\n"
+                            "   删除：/buptnews dektoken user delete")
+                token = rest[0]
+                # "仅能设置自己的"：光靠"只能用自己 QQ 号"不够 ——
+                # 粘别人的 token 同样会写进自己的绑定，必须核对 JWT 里的 sub。
                 sub = str(decode_jwt(token).get("sub") or "")
                 if sub != str(target):
                     return ("⚠️ 这个 token 不是你的（JWT 里的 sub 与你的 QQ 号不一致）。\n"
                             "   请粘贴**你自己**登录后的 token")
             else:
-                if len(rest) != 2:
-                    return ("⚠️ 用法：/buptnews dektoken group <群号> <JWT>")
+                if is_delete:
+                    if len(rest) != 1:
+                        return "⚠️ 用法：/buptnews dektoken group <群号> delete"
+                elif len(rest) != 2:
+                    return ("⚠️ 用法：/buptnews dektoken group <群号> <JWT>\n"
+                            "   删除：/buptnews dektoken group <群号> delete")
                 try:
                     target = int(rest[0])
                 except (TypeError, ValueError):
                     return "⚠️ 群号必须是数字"
-                token = rest[1]
+                token = None if is_delete else rest[1]
                 spec = self._target("group", target)
                 if not spec:
                     return (f"⚠️ 群 {target} 还没有绑定。\n"
@@ -3521,8 +3604,25 @@ class BuptNewsPlugin(PluginBase):
                             f"💡 让管理员执行：/buptnews set group {target} event=on")
                 role = await self._group_role_of(target, uid)
                 if role not in ("owner", "admin"):
-                    return (f"⚠️ 只有群 {target} 的**群主或管理员**能设置它的 token"
+                    return (f"⚠️ 只有群 {target} 的**群主或管理员**能操作它的 token"
                             f"（当前身份：{role or '未知'}）")
+                if is_delete:
+                    if not spec.get("token_file") or not self._has_token(
+                            spec, "group", target):
+                        return f"ℹ️ 群 {target} 目前没有 token"
+                    self._remove_token("group", target, spec)
+                    who = spec.get("token_by")
+                    tail = (f"（原设置者：{who}）" if who else "")
+                    return (f"✅ 已删除群 {target} 的第二课堂 token{tail}，"
+                            f"活动同步已暂停\n"
+                            f"💡 重新设置：/buptnews dektoken group {target} <JWT>")
+                # 一个群只有一个人设置 token：别人想换必须先删除
+                owner = int(spec.get("token_by") or 0)
+                if owner and owner != uid:
+                    return (f"⚠️ 群 {target} 的 token 由 {owner} 设置，"
+                            f"一个群只能有一个人设置。\n"
+                            f"   如需更换：先 /buptnews dektoken group {target} delete\n"
+                            f"   或让 {owner} 自己重设（续期）")
 
             # 写盘 + 立即生效（不重启）
             try:
@@ -3532,12 +3632,13 @@ class BuptNewsPlugin(PluginBase):
             data = self._targets()
             key = "groups" if kind == "group" else "users"
             data[key][target]["token_file"] = path
+            data[key][target]["token_by"] = uid
             self._save_targets(data)
             binding = self._refresh_activity_bindings()
             ok = any(b["kind"] == kind and b["target"] == target
                      and b["client"].available for b in binding)
-            self.logger.info("[bupt_news] 已更新 %s %s 的第二课堂 token（有效=%s）",
-                             kind, target, ok)
+            self.logger.info("[bupt_news] 已更新 %s %s 的第二课堂 token"
+                             "（设置者 %s，有效=%s）", kind, target, uid, ok)
             if not ok:
                 return ("⚠️ token 已保存，但它**不是有效的 JWT**（解不出 sub）。\n"
                         "   请确整段复制 `localStorage[\"secondclass.tokenv3\"]` 的值。")
@@ -3546,7 +3647,7 @@ class BuptNewsPlugin(PluginBase):
                 if b["kind"] == kind and b["target"] == target:
                     exp = b["client"].expiry()
             tail = f"（有效期至 {exp:%Y-%m-%d %H:%M}）" if exp else ""
-            return (f"✅ 已保存 {'群' if kind == 'group' else '用户'} "
+            return (f"✅ 已保存 {label} "
                     f"{target} 的第二课堂 token{tail}，活动同步已生效")
 
         @reg("buptnews.on", permission="superuser", scope="private", description="开启推送")

@@ -1054,10 +1054,10 @@ async def main(online: bool) -> int:
         check("set 关掉通知推送",
               plugin._targets()["users"][10001]["message"] is False,
               str(plugin._targets()["users"][10001]))
+        before_spec = dict(plugin._targets()["users"][10001])
         await dispatch("/buptnews set user 10001", "private", SUPERUSER)
         check("set 不给开关时什么都不改（幂等）",
-              plugin._targets()["users"][10001] == {"message": False, "event": True,
-                                                   "token_file": plugin._targets()["users"][10001].get("token_file")},
+              plugin._targets()["users"][10001] == before_spec,
               str(plugin._targets()["users"][10001]))
         _, bad = await dispatch("/buptnews set user 10001 event=maybe", "private", SUPERUSER)
         check("set 非法开关值有明确提示", "认不出" in bad, bad[:80])
