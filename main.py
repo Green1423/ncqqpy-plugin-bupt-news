@@ -121,6 +121,7 @@ import asyncio
 import functools
 import inspect
 import os
+import random
 import re
 import time
 import traceback
@@ -281,6 +282,11 @@ AFTERCLASS_DEFAULTS = {
     "enabled": False,
     "base": "https://dekt.bupt.edu.cn",
     "max_per_round": 5,        # 单个绑定单轮最多推几条（避免一次刷屏）
+    # 活动刷新间隔（秒）：**不跟通知的 10 分钟一轮** —— 服务端活动本身的更新
+    # 节奏就是 10–60 分钟不等，刷得更勤只会增加被风控的机会。
+    # 实际每次在 [min, max] 之间取随机值，避免固定周期被识别成机器人。
+    "interval_min": 600,
+    "interval_max": 3600,
     "max_records": 300,        # 每个绑定本地保留多少条活动记录
     # **独立绑定**：每个推送目标（一个群或一个用户）**各自一份 JWT**。
     # 第二课堂的活动列表是按账号（学院/年级/角色）算的，不同账号看到的活动不同，
@@ -938,7 +944,8 @@ class BuptNewsPlugin(PluginBase):
 
     async def _sync_once(self, reason: str = "定时", pages: int = 1,
                          force_push: bool = False, preview_user: int | None = None,
-                         preview_group: int | None = None):
+                         preview_group: int | None = None,
+                         force_acts: bool = False):
         """执行一轮同步。
 
         Returns:
@@ -954,8 +961,12 @@ class BuptNewsPlugin(PluginBase):
             # 第二课堂与通知是两条独立链路：通知失败不该拖累活动，
             # 活动失败也不该让整轮同步算失败（各自内部吞异常并记日志）。
             # preview 是"只发给自己看通知"，不该顺带把活动推给群。
-            if preview_user is None:
+            # 活动**按自己的随机间隔**刷新（10–60 分钟），不跟着通知的每轮跑；
+            # 手动 `/buptnews sync` 视为"现在就看"，强制刷一次。
+            if preview_user is None and (force_acts or self._activity_due()):
                 await self._sync_activities()
+                if getattr(self, "_act_bindings", None):
+                    self._schedule_next_activity()
             return result
         except PortalAuthError as e:
             self.logger.error("[bupt_news] 门户认证失败：%s", e)
@@ -1434,6 +1445,37 @@ class BuptNewsPlugin(PluginBase):
             lines.append(f"{prefix}{rec.get('id')} {date} {title}".rstrip())
         return lines
 
+    def _activity_due(self, now: float | None = None) -> bool:
+        """活动这一轮该不该刷新（间隔在 `interval_min`~`interval_max` 之间随机）。"""
+        if not getattr(self, "_act_bindings", None):
+            return False
+        now = time.time() if now is None else now
+        try:
+            nxt = float(self._store.meta_get("acts_next_at") or 0)
+        except (TypeError, ValueError):
+            nxt = 0.0
+        return now >= nxt
+
+    def _schedule_next_activity(self, now: float | None = None) -> float:
+        """安排下一次活动刷新（随机抖动），落盘到 state.json 的 meta。
+
+        为什么随机：固定 10 分钟整点刷新是最容易被判定为机器人的特征之一；
+        为什么落盘：插件热重载/重启后不该立刻又刷一遍（那等于把间隔打了个洞）。
+        """
+        ac = self.config.get("afterclass") or {}
+        try:
+            lo = max(60, int(ac.get("interval_min", 600) or 600))
+            hi = max(lo, int(ac.get("interval_max", 3600) or 3600))
+        except (TypeError, ValueError):
+            lo, hi = 600, 3600
+        base = time.time() if now is None else now
+        nxt = base + random.uniform(lo, hi)
+        try:
+            self._store.meta_set("acts_next_at", nxt)
+        except Exception as e:  # noqa: BLE001 - 落盘失败不该影响同步
+            self.logger.warning("[bupt_news] 记录下次活动刷新时间失败：%s", e)
+        return nxt
+
     def _afterclass_status_line(self) -> str:
         """状态里的「第二课堂」一行：绑定数、活动总数、待推数、最早到期时间。"""
         ac = self.config.get("afterclass") or {}
@@ -1450,6 +1492,12 @@ class BuptNewsPlugin(PluginBase):
                  f"{pending} 条待推"]
         if missing:
             parts.append(f"⚠️ {len(missing)} 个缺 token")
+        try:
+            nxt = float(self._store.meta_get("acts_next_at") or 0)
+        except (TypeError, ValueError):
+            nxt = 0.0
+        if nxt > time.time():
+            parts.append(f"下次刷新 {datetime.fromtimestamp(nxt):%H:%M}")
         expiries = [b["client"].expiry() for b in bindings
                     if callable(getattr(b["client"], "expiry", None))]
         expiries = [e for e in expiries if e is not None]
@@ -3687,6 +3735,7 @@ class BuptNewsPlugin(PluginBase):
                 reason="手动", pages=pages, force_push=True,
                 preview_user=int(event.user_id) if preview else None,
                 preview_group=temp_group,
+                force_acts=True,      # 手动同步 = 现在就看，不等随机间隔
             )
             if result is None:
                 return "⚠️ 同步未完成，见日志（可能是未配置账号密码或门户不可达）"

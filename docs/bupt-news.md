@@ -785,6 +785,22 @@ belong_to, target_id, target_role, grade, priority, picture_url, digest
 - `activity_class` 要用 `/activity/class` 的 `id → name` 翻译（"文艺活动"/"学术讲座"…）；
 - `demands` 是位掩码（`23` = 报名+签到+签退+管理）。
 
+**请求指纹锁死成微信客户端**：服务端只认 `MicroMessenger` 客户端的 UA，
+换成桌面 Chrome / `curl` / 或"Linux + MicroMessenger"这种自相矛盾的组合会被
+WAF 挡掉。`dekt.py` 里固定成一台 iPhone 上微信小程序的 UA，**不要按平台改、
+也不要随机轮换** —— 换一次等于换一台设备，反而更可疑。
+
+**刷新节奏**：活动**不跟通知的 10 分钟一轮**，而是自己在
+`interval_min`~`interval_max`（默认 600~3600 秒，即 **10–60 分钟**）之间
+每次取随机值：
+
+- 服务端活动本身的更新节奏就是 10–60 分钟不等，刷得更勤只增加被风控的机会；
+- 固定周期（比如整 10 分钟）是最容易被识别成机器人的特征之一，所以加抖动；
+- 下次刷新时间落在 `state.json` 的 `meta.acts_next_at`，**热重载/重启不会把它清零**
+  （否则每次改代码都会立刻多刷一轮）；
+- 手动 `/buptnews sync` 视为"现在就看"，**强制**刷一次，不等间隔；
+- `/buptnews status` 里能看到 `下次刷新 HH:MM`。
+
 **同步口径**（与通知刻意保持一致）：
 
 - 挂在同一轮定时同步之后（`_sync_once` → `_do_sync` 之后），

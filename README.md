@@ -74,6 +74,8 @@ git clone https://github.com/Green1423/ncqqpy-plugin-bupt-news plugins/bupt_news
     "enabled": false,
     "base": "https://dekt.bupt.edu.cn",
     "max_per_round": 5,
+    "interval_min": 600,
+    "interval_max": 3600,
     "max_records": 300,
     "bindings": []
   },

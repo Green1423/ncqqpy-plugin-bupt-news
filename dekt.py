@@ -22,10 +22,14 @@ import aiohttp
 
 DEKT_BASE = "https://dekt.bupt.edu.cn"
 API_PREFIX = "/api/v1"
+#: ⚠️ **锁死成微信客户端 UA**：服务端只认 `MicroMessenger` 客户端的指纹，
+#: 换别的（桌面 Chrome、纯 curl、或"Linux + MicroMessenger"这种自相矛盾的组合）
+#: 会被 WAF / 风控挡掉。所以这里固定成一台 iPhone 上微信小程序的 UA，
+#: **不要按平台改、也不要随机轮换** —— 换一次就等于换一台设备，反而更可疑。
 USER_AGENT = (
-    "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 "
-    "MicroMessenger/8.0.50 miniProgram"
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
+    "MicroMessenger/8.0.50(0x1800323c) NetType/WIFI Language/zh_CN miniProgram"
 )
 # 小程序会把版本号一起带上；服务端对缺失它多数接口仍放行，带上更接近真实客户端
 UAPP_VERSION = "1.0.0"

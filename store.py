@@ -128,6 +128,10 @@ class StateStore:
             # 编号本身就能还原原文链接（见 external_code / decode_external），
             # 这里只是把标题/日期等元数据顺手带上，好让 `get`/`pin` 免于重新抓取。
             "externals": {},
+            # 插件自用的通用元数据（例：活动下次刷新时间、token 提醒日期）。
+            # ⚠️ 必须列在这里：`load()` 只回填**已知键**，不在默认结构里的键
+            # 落盘后会被静默丢弃（踩过：meta_set 写了，重载后 meta_get 拿到 None）。
+            "meta": {},
         }
         self._index: dict[str, set] = {}
         self._pushed: set[str] = set()
