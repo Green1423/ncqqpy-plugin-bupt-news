@@ -178,7 +178,7 @@ cp .env.example .env      # 填 BUPT_PORTAL_PASSWORD 与 DEEPSEEK_API_KEY
 | `/buptnews add group\|user <号> [message=on\|off] [event=on\|off]` | 仅私聊 | **superuser** | **绑定**目标（合并了原 `bind` 与 `add`）：在表里即可私聊/小窗用命令，`message` 决定推不推通知（默认开），`event` 决定推不推活动（默认关） |
 | `/buptnews set group\|user <号> [message=] [event=]` | 仅私聊 | **superuser** | 只改开关，没给的保持不变 |
 | `/buptnews del group\|user <号>` | 仅私聊 | **superuser** | 移除绑定（连带删掉数据目录里的 token） |
-| `/buptnews dektoken user <JWT>` | 仅私聊 | 公开（命令内判定） | 设置**自己**的第二课堂 token；要求自己已 `event=on`，且 JWT 的 `sub` 必须是自己 |
+| `/buptnews dektoken user <JWT>` | 仅私聊 | 公开（命令内判定） | 设置**自己名下**的第二课堂 token；要求自己已 `event=on`。⚠️ JWT 的 `sub` 是**学号**，与 QQ 号**没有映射关系**，所以无法用 `sub` 校验"这是不是你的 token"——只能保证"你只能往自己名下写"，并把你 token 里的学号记下来供核对 |
 | `/buptnews dektoken group <群号> <JWT>` | 仅私聊 | 公开（命令内判定） | 设置某个群的 token；要求该群已 `event=on`，且调用者是**群主/管理员** |
 | `/buptnews on` / `/buptnews off` | 仅私聊 | **superuser** | 开关推送 |
 | `/buptnews interval <时长>` | 仅私聊 | **superuser** | 设置间隔，支持 `600` / `10m` / `1h` |

@@ -687,6 +687,8 @@ class BuptNewsPlugin(PluginBase):
                         # 谁设置的 token —— 过期时通知**这个人**（群 token 尤其需要：
                         # 群里只有他一个人有账号，别人想续期得先删掉重设）
                         "token_by": token_by,
+                        # token 对应的学号（`sub`）：只用于展示，**与 QQ 号无关**
+                        "dekt_sub": str(spec.get("dekt_sub") or ""),
                     }
             return out
 
@@ -734,6 +736,8 @@ class BuptNewsPlugin(PluginBase):
                     entry["token_file"] = str(spec["token_file"])
                 if spec.get("token_by"):
                     entry["token_by"] = int(spec["token_by"])
+                if spec.get("dekt_sub"):
+                    entry["dekt_sub"] = str(spec["dekt_sub"])
                 payload[key][str(int(tid))] = entry
         self.config.set("targets", payload)
 
@@ -1403,6 +1407,7 @@ class BuptNewsPlugin(PluginBase):
         if target in data[key]:
             data[key][target]["token_file"] = ""
             data[key][target]["token_by"] = 0
+            data[key][target]["dekt_sub"] = ""
             self._save_targets(data)
         self._refresh_activity_bindings()
 
@@ -3563,7 +3568,10 @@ class BuptNewsPlugin(PluginBase):
                         tok = self._token_path(kind, tid, spec)
                         if os.path.exists(tok):
                             by = int(spec.get("token_by") or 0)
-                            flags.append("活动" + (f"（{by} 设）" if by else ""))
+                            sub = str(spec.get("dekt_sub") or "")
+                            detail = "·".join(x for x in (
+                                f"{by} 设" if by else "", f"学号 {sub}" if sub else "") if x)
+                            flags.append("活动" + (f"（{detail}）" if detail else ""))
                         else:
                             flags.append("活动⚠️缺token")
                     else:
@@ -3633,12 +3641,10 @@ class BuptNewsPlugin(PluginBase):
                     return ("_schema_error",
                             "user 形态需要且只需要一个参数：<JWT> 或 delete")
                 token = rest[0]
-                # "仅能设置自己的"：光靠"只能用自己 QQ 号"不够 ——
-                # 粘别人的 token 同样会写进自己的绑定，必须核对 JWT 里的 sub。
-                sub = str(decode_jwt(token).get("sub") or "")
-                if sub != str(target):
-                    return ("⚠️ 这个 token 不是你的（JWT 里的 sub 与你的 QQ 号不一致）。\n"
-                            "   请粘贴**你自己**登录后的 token")
+                # ⚠️ `sub` 是**学号/工号**，与 QQ 号**无关**（两者没有映射关系），
+                # 所以不能拿 `sub == 调用者 QQ` 来判"是不是本人的 token"——
+                # 那会把所有正常 token 都误拒。这里只记下 sub，用于展示
+                # "这个绑定绑的是哪个学号"，归属判定靠"只能写自己名下的绑定"。
             else:
                 if is_delete:
                     if len(rest) != 1:
@@ -3690,6 +3696,9 @@ class BuptNewsPlugin(PluginBase):
             key = "groups" if kind == "group" else "users"
             data[key][target]["token_file"] = path
             data[key][target]["token_by"] = uid
+            # 记下 token 对应的学号，便于在 targets 里核对"这是谁的账号"
+            data[key][target]["dekt_sub"] = str(
+                decode_jwt(token).get("sub") or "")
             self._save_targets(data)
             binding = self._refresh_activity_bindings()
             ok = any(b["kind"] == kind and b["target"] == target
