@@ -1136,9 +1136,12 @@ class BuptNewsPlugin(PluginBase):
         过期后活动同步静默停摆，光记日志没人会看到。
         """
         today = self._today()
-        warned = getattr(self, "_token_warn_dates", None)
+        # ⚠️ 存在 state.json 里而不是内存属性：插件热重载会重建实例，
+        # 内存态一丢就会对同一天同一个绑定**重复发提醒**（实测：一次代码改动
+        # 触发两次重载 → 设置者 16 秒内收到两条一模一样的过期提醒）。
+        warned = self._store.meta_get("token_warn_dates")
         if not isinstance(warned, dict):
-            warned = self._token_warn_dates = {}
+            warned = {}
         for binding in getattr(self, "_act_bindings", []) or []:
             client = binding.get("client")
             get_expiry = getattr(client, "expiry", None)
@@ -1154,6 +1157,10 @@ class BuptNewsPlugin(PluginBase):
             if warned.get(key) == today:
                 continue
             warned[key] = today
+            try:
+                self._store.meta_set("token_warn_dates", warned)
+            except Exception as e:  # noqa: BLE001 - 落盘失败不该拦住提醒
+                self.logger.warning("[bupt_news] 记录提醒日期失败：%s", e)
 
             kind, target = binding["kind"], binding["target"]
             label = f"{'群' if kind == 'group' else '用户'} {target}"

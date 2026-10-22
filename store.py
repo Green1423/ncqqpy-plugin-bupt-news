@@ -305,6 +305,26 @@ class StateStore:
     def notice_count(self) -> int:
         return len(self._notices)
 
+    # ---------------- 通用元数据 ----------------
+
+    def meta_get(self, key: str, default=None):
+        """读一个插件自用的元数据（写在 state.json 的 `meta` 段）。
+
+        给小状态用（例：某个提醒今天发过没有）。放这里而不是内存属性，
+        是因为**插件热重载会重建实例**，内存态会丢，同一件事就会重复提醒。
+        """
+        meta = self._data.get("meta")
+        if not isinstance(meta, dict):
+            return default
+        return meta.get(key, default)
+
+    def meta_set(self, key: str, value) -> None:
+        meta = self._data.get("meta")
+        if not isinstance(meta, dict):
+            meta = self._data["meta"] = {}
+        meta[key] = value
+        self.save()
+
     # ---------------- 置顶（独立编号 P<n>） ----------------
 
     def _pins(self) -> list[dict]:
