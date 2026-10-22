@@ -2861,18 +2861,11 @@ class BuptNewsPlugin(PluginBase):
         @reg("buptnews", permission="admin", scope="all",
              description="校内通知推送管理")
         async def cmd_root(packet):
-            # 子命令清单（含每条命令自己的权限与范围）交给框架生成：
-            # 手写清单会与注册声明漂移，且带不上权限提示。
-            handler = self.cmds.list_commands().get("buptnews")
-            if handler is None:                     # 理论上不可达
-                return "📢 校内通知推送：子命令清单不可用，见日志"
-            # 占位符图例由框架在 render_help 里按需附上（子命令都带参数），
-            # 这里不要再追加一次，否则会连着出现两行。
-            text = "📢 " + handler.help_text
-            evt = getattr(packet, "event", None)
-            if evt is not None and evt.message_type == "group":
-                text += "\n\n" + GROUP_AT_HINT   # 群里要 @机器人 才会触发
-            return text
+            # ⚠️ 命令组本体**不会被执行**：框架在路由到子命令前就把裸调
+            # （`/buptnews`）重定向到 `/help buptnews`，帮助页由注册信息渲染
+            # （本体描述 + 你有权使用的子命令 + 群里的 @机器人 提示）。
+            # 所以这里刻意不写任何逻辑 —— 写了也不会运行，只会误导后来的人。
+            return None
 
         @reg("buptnews.status", permission="superuser", scope="private",
              description="查看推送状态")
@@ -3379,7 +3372,10 @@ class BuptNewsPlugin(PluginBase):
                 if kind == "group" and event.group_id:
                     target = int(event.group_id)
                 else:
-                    return "⚠️ 请指定群号/QQ号（本群可用 `add group` 省略）"
+                    # 用法不足 = 让框架回「⚠️ 用法不正确 + /help buptnews.add」，
+                    # 而不是自己拼一句用法（手写会与 Schema 漂移，见 plugin-dev §4.3.1）
+                    return ("_schema_error",
+                            "请指定群号/QQ号（群聊里可用 `add group` 省略）")
             target = int(target)
             label = "群" if kind == "group" else "用户"
             switches, errors = self._parse_switches(
@@ -3428,7 +3424,7 @@ class BuptNewsPlugin(PluginBase):
                 if kind == "group" and event.group_id:
                     target = int(event.group_id)
                 else:
-                    return "⚠️ 请指定群号/QQ号"
+                    return ("_schema_error", "请指定群号/QQ号")
             target = int(target)
             label = "群" if kind == "group" else "用户"
             data = self._targets()
@@ -3472,7 +3468,7 @@ class BuptNewsPlugin(PluginBase):
                 if kind == "group" and event.group_id:
                     target = int(event.group_id)
                 else:
-                    return "⚠️ 请指定群号/QQ号"
+                    return ("_schema_error", "请指定群号/QQ号")
             target = int(target)
             label = "群" if kind == "group" else "用户"
             data = self._targets()
@@ -3548,6 +3544,11 @@ class BuptNewsPlugin(PluginBase):
             uid = int(getattr(event, "user_id", 0) or 0)
             if not uid:
                 return "❓ 无法识别你的 QQ 号"
+            if not rest:
+                # 裸调（`/buptnews dektoken`）没有任何参数 → 交给框架回帮助页，
+                # 而不是先报"你还没绑定"（用户连怎么写都还不知道）
+                return ("_schema_error",
+                        "需要 <JWT>（user）或 <群号> <JWT>（group）")
             label = "群" if kind == "group" else "用户"
 
             # `delete`（也收 删除/del）出现在 token 位 = 删除模式
@@ -3574,8 +3575,8 @@ class BuptNewsPlugin(PluginBase):
                     self._remove_token("user", target, spec)
                     return "✅ 已删除你的第二课堂 token，活动同步已暂停"
                 if len(rest) != 1:
-                    return ("⚠️ 用法：/buptnews dektoken user <JWT>\n"
-                            "   删除：/buptnews dektoken user delete")
+                    return ("_schema_error",
+                            "user 形态需要且只需要一个参数：<JWT> 或 delete")
                 token = rest[0]
                 # "仅能设置自己的"：光靠"只能用自己 QQ 号"不够 ——
                 # 粘别人的 token 同样会写进自己的绑定，必须核对 JWT 里的 sub。
@@ -3586,14 +3587,15 @@ class BuptNewsPlugin(PluginBase):
             else:
                 if is_delete:
                     if len(rest) != 1:
-                        return "⚠️ 用法：/buptnews dektoken group <群号> delete"
+                        return ("_schema_error",
+                            "group 删除需要群号：dektoken group <群号> delete")
                 elif len(rest) != 2:
-                    return ("⚠️ 用法：/buptnews dektoken group <群号> <JWT>\n"
-                            "   删除：/buptnews dektoken group <群号> delete")
+                    return ("_schema_error",
+                            "group 形态需要 <群号> <JWT>（删除则用 delete）")
                 try:
                     target = int(rest[0])
                 except (TypeError, ValueError):
-                    return "⚠️ 群号必须是数字"
+                    return ("_schema_error", "群号必须是数字")
                 token = None if is_delete else rest[1]
                 spec = self._target("group", target)
                 if not spec:

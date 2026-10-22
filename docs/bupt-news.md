@@ -159,6 +159,10 @@ cp .env.example .env      # 填 BUPT_PORTAL_PASSWORD 与 DEEPSEEK_API_KEY
 
 命令前缀取自 `config.json` 的 `command_prefixes`（默认 `/` 和 `#`）。
 下表按 `plugins/bupt_news/main.py` 的**实际注册声明**列出（`scope`/`permission` 以代码为准）：
+>
+> 用法不足或写错时**不用记语法**：框架会回「⚠️ 用法不正确：<原因>」并附上
+> `/help buptnews.<子命令>` 的完整帮助页（用法行 + 参数表 + 默认值）。
+> 裸调 `/buptnews` 也是同一页。
 
 | 命令 | 范围 | 权限 | 说明 |
 |------|------|------|------|

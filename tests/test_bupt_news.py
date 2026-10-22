@@ -872,10 +872,15 @@ async def main(online: bool) -> int:
     fixture_check("无子命令的命令与子命令同版式：`[📖 命令]` 段 + `  /名字 — 介绍`",
           section_of(help_admin, "/ban —") == "[📖 命令]"
           and line_of(help_admin, "/ban —") == "/ban — 禁言成员", help_admin[:400])
-    fixture_check("普通成员仍能看到命令组分区（子命令在第二级过滤）",
+    # 命令组分区仍在（buptnews 有公开子命令），但**整组都无权**的组会隐藏：
+    # group_config 只有 admin 专属的 greeting，普通成员看不到它（不暴露命令组存在）。
+    fixture_check("普通成员仍能看到命令组分区（有可用子命令的组）",
           section_of(help_member, "/buptnews —") == "[📦 命令组]"
-          and section_of(help_member, "/group_config —") == "[📦 命令组]",
+          and "/group_config —" not in help_member,
           help_member[:160])
+    fixture_check("群管理员能看到 group_config 命令组",
+          section_of(help_admin, "/group_config —") == "[📦 命令组]",
+          help_admin[:160])
     fixture_check("群管理员能看到 admin 命令、看不到 superuser 命令",
           "/ban —" in help_admin and "/bind —" not in help_admin,
           help_admin[:200])
@@ -944,8 +949,17 @@ async def main(online: bool) -> int:
     check("命令组本体无需权限：普通成员可直接执行",
           not isinstance(res_ns, tuple) and "校内通知推送" in text_ns, repr(res_ns))
     res_gc, _ = await dispatch("/group_config", "group", 30001, GROUP_BOUND)
-    fixture_check("命令组本体无需权限：group_config 普通成员可执行",
-          not isinstance(res_gc, tuple), repr(res_gc))
+    # 框架口径：命令组本体不设权限，但要**至少有一个子命令对调用者可用**，
+    # 否则按「未知命令」隐藏（否则普通成员能看出超管专属命令组的存在）。
+    # essential 的 group_config 只有 `greeting`（admin），所以普通成员拿到的是哨兵。
+    fixture_check("命令组：所有子命令都无权时按未知命令隐藏",
+                  isinstance(res_gc, tuple) and res_gc[0] == "_not_found",
+                  repr(res_gc))
+    perm.set_group_role(GROUP_BOUND, 30001, "admin")
+    res_gc_admin, _ = await dispatch("/group_config", "group", 30001, GROUP_BOUND)
+    fixture_check("命令组：有可用子命令（群管理员）时回帮助页",
+                  not isinstance(res_gc_admin, tuple), repr(res_gc_admin))
+    perm.set_group_role(GROUP_BOUND, 30001, "member")
     res_gcp, _ = await dispatch("/group_config", "private", SUPERUSER)
     fixture_check("命令组本体仍受 scope 约束（group_config 仅群聊）",
           isinstance(res_gcp, tuple) and res_gcp[0] == "_not_found", repr(res_gcp))
