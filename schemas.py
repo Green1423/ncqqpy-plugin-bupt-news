@@ -2,14 +2,8 @@
 
 位置参数按字段定义顺序绑定，也可用 `key=value` 形式传入。
 """
-from napcat import (
-    BoolField,
-    ChoiceField,
-    CommandSchema,
-    DurationField,
-    IntField,
-    QQField,
-    StrField,
+from napcat.command import (
+    BoolField, ChoiceField, CommandSchema, DurationField, IntField, QQField, StrField,
     VariadicField,
 )
 
@@ -74,8 +68,16 @@ class ImagesSchema(CommandSchema):
 
 
 class PinSchema(CommandSchema):
+    # ⚠️ `ids` 必须排在 `force` **之前**：位置参数按字段顺序绑定，
+    # 否则 `pin 4` 里的 `4` 会被绑到 force 上（报"必须为布尔值"）。
+    # 框架不认"无值长选项"，所以 force 要写成 `--force=true` 或短选项 `-f`
+    #（短选项在 kwargs 里的键是 `f`，命令层做了兼容）。
     ids = VariadicField(description="要置顶的通知编号，可多个（空格或逗号分隔）；"
                                     "不带参数=查看当前置顶")
+    force = BoolField(default=False,
+                      description="已到置顶上限时替换最早置顶的那条"
+                                  "（不加则报错并提示先 unpin）。"
+                                  "写法：`--force=true` 或短选项 `-f`")
 
 
 class UnpinSchema(CommandSchema):

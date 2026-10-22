@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))                 # napcat 框架
 sys.path.insert(0, str(ROOT / "plugins"))     # bupt_news 包（backfill/images/portal/store 用相对导入）
 
-from napcat import ConfigManager                                     # noqa: E402
+from napcat.config import ConfigManager
 from bupt_news.backfill import (download_missing_images,             # noqa: E402
                                 missing_image_urls, recrawl_missing_images,
                                 records_missing_images)

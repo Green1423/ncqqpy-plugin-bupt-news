@@ -54,8 +54,10 @@ if not (PLUGIN_DIR / "__init__.py").exists() and (ROOT / "__init__.py").exists()
     PLUGIN_DIR = PLUGIN_ROOT_DIR / PLUGIN_NAME
 PLUGIN_PKG = f"plugins.{PLUGIN_NAME}"
 
-from napcat import (ConfigManager, GroupBinding, GroupIncreaseEvent,   # noqa: E402
-                    MessageChain, MessageEvent)
+from napcat.config import ConfigManager
+from napcat.client import GroupBinding
+from napcat.models import GroupIncreaseEvent, MessageEvent
+from napcat.message import MessageChain
 from napcat.command import CommandManager                              # noqa: E402
 from napcat.events import EventBus, TimerManager                       # noqa: E402
 from napcat.file_manager import FileManager                            # noqa: E402
@@ -442,7 +444,7 @@ async def main(online: bool) -> int:
     check("端到端：消息段形态同样生效", _e2e_arr == "pong", repr(_e2e_arr))
 
     # 归一化入口是全框架单一来源
-    from napcat import normalize_text as _norm
+    from napcat.command import normalize_text as _norm
     check("normalize_text 去掉首尾空白与前导 @",
           _norm("  [@123] /buptnews get 451\n") == "/buptnews get 451",
           repr(_norm("  [@123] /buptnews get 451\n")))
@@ -2597,7 +2599,7 @@ async def ws_tests(tmp: Path) -> None:
             pass
 
     server_e, port_e = await _serve(handler_e)
-    from napcat import NapCatClient
+    from napcat.client import NapCatClient
     client = NapCatClient(ws_url=f"ws://127.0.0.1:{port_e}", config_path=str(cfg_path),
                           plugin_dir=str(empty_plugins), reconnect_interval=0.2,
                           api_delay=(0, 0))

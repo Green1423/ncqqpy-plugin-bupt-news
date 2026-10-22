@@ -7,10 +7,94 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Iterable, Optional
 
 STATE_VERSION = 2
+
+# 非本地编号前缀：`E<treeid>-<newsid>`
+EXTERNAL_PREFIX = "E"
+
+# 置顶到达上限且没有 force 时，`pin()` 的返回值（调用方据此提示用户）
+PIN_LIMIT_REACHED = "limit"
+
+
+def _add_pin_entry(pins: list[dict], entry: dict, *,
+                   limit: int, force: bool) -> tuple[int | None, dict | None]:
+    """把 `entry` 加入置顶列表，返回 `(新编号, 被替换掉的置顶项 | None)`。
+
+    * `limit > 0` 且已满、`force=False` → 返回 `(None, None)`（调用方提示"已满"）
+    * `limit > 0` 且已满、`force=True`  → 淘汰**最早置顶**的那条（FIFO），
+      新项继承它的编号（置顶区始终是紧凑的 P1…Pn）
+    * 编号取最小空号：取消置顶后空出来的号会被下一次置顶复用
+    """
+    used = {p["n"] for p in pins if p.get("n")}
+    num = 1
+    while num in used:
+        num += 1
+    evicted: dict | None = None
+    if limit and len(pins) >= limit:
+        if not force:
+            return None, None
+        # 淘汰最早置顶的那条；FIFO 用**置顶顺序**（列表顺序）判断，
+        # 不能用 P 编号 —— 编号会复用，P1 可能反而是最新加的。
+        oldest_idx = 0
+        if pins:
+            evicted = pins.pop(oldest_idx)
+            num = int(evicted.get("n") or num)
+    entry = dict(entry, n=num)
+    pins.append(entry)
+    return num, evicted
+
+
+def external_code(notice) -> str:
+    """从通知（dict 或 Notice）生成可解码编号 `E<treeid>-<newsid>`。
+
+    带前缀是为了与本地编号（纯数字）和置顶编号（`P<n>`）彻底分开。
+    取不到 treeid/newsid 时返回空串（调用方据此回退成链接）。
+    """
+    if isinstance(notice, dict):
+        treeid = str(notice.get("treeid") or "").strip()
+        newsid = str(notice.get("newsid") or "").strip()
+    else:
+        treeid = str(getattr(notice, "treeid", "") or "").strip()
+        newsid = str(getattr(notice, "newsid", "") or "").strip()
+    if not treeid or not newsid:
+        return ""
+    # 只保留数字，避免把怪字符带进编号（门户的这两个 id 都是纯数字）
+    treeid = re.sub(r"\D", "", treeid)
+    newsid = re.sub(r"\D", "", newsid)
+    if not treeid or not newsid:
+        return ""
+    return f"{EXTERNAL_PREFIX}{treeid}-{newsid}"
+
+
+def decode_external(code) -> tuple[str, str] | None:
+    """把 `E<treeid>-<newsid>` 解回 `(treeid, newsid)`；不是外部编号返回 None。
+
+    编号里**自带**还原门户链接所需的两个参数，因此不需要任何映射表：
+    拿到编号就能构造原文地址（`external_url()`），哪怕缓存早被清理。
+    """
+    text = str(code or "").strip()
+    m = re.fullmatch(r"[Ee](\d{1,12})-(\d{1,20})", text)
+    if not m:
+        return None
+    return m.group(1), m.group(2)
+
+
+def external_url(code, base: str = "http://my.bupt.edu.cn") -> str:
+    """非本地编号 → 门户原文链接（编号里就含 treeid/newsid）。"""
+    pair = decode_external(code)
+    if not pair:
+        return ""
+    treeid, newsid = pair
+    return (f"{base}/xntz_content.jsp?urltype=news.NewsContentUrl"
+            f"&wbtreeid={treeid}&wbnewsid={newsid}")
+
+
+def is_external_code(code) -> bool:
+    return decode_external(code) is not None
 
 
 class StateStore:
@@ -32,14 +116,23 @@ class StateStore:
             "lastSync": None,
             "lastDigestDate": None,
             "pushedCount": 0,     # 累计推送条数（统计用）
-            # 置顶的通知 id（按置顶时间顺序，最近的在后）。
-            # 放在 state.json 而不是 notices.jsonl：置顶是"用户选择"这类小状态，
-            # 且必须比正文记录活得久（记录被 retention 淘汰后置顶标记也要能清理，
-            # 见 _prune_pins）。空列表是合法值，不影响旧文件加载。
+            # 置顶项：[{"n": 置顶编号 P<n>, "id": 本地通知 id}]
+            # 置顶**有自己的独立编号**（P1/P2…，按置顶顺序递增；取消后空号可复用），
+            # 与通知编号是两个空间 —— 用户 `unpin P2` 摘的是「第 2 个置顶项」，
+            # 而不是 id 为 2 的通知。
+            # 放在 state.json（不是 notices.jsonl）：置顶是"用户选择"这类小状态，
+            # 且必须比正文记录活得久（记录被 retention 淘汰后置顶项也要能清理）。
             "pins": [],
+            # 非本地（门户检索）结果的**可解码编号**缓存：
+            # `{"E<treeid>-<newsid>": {"notice": {...}, "ts": 时间}}`
+            # 编号本身就能还原原文链接（见 external_code / decode_external），
+            # 这里只是把标题/日期等元数据顺手带上，好让 `get`/`pin` 免于重新抓取。
+            "externals": {},
         }
         self._index: dict[str, set] = {}
         self._pushed: set[str] = set()
+        #: 最近一次 pin()/pin_external() 被替换掉的置顶项（给调用方提示用）
+        self.last_pin_evicted: dict | None = None
         self._notices: dict[int, dict] = {}
         self.load()
 
@@ -212,76 +305,251 @@ class StateStore:
     def notice_count(self) -> int:
         return len(self._notices)
 
-    # ---------------- 置顶 ----------------
+    # ---------------- 置顶（独立编号 P<n>） ----------------
+
+    def _pins(self) -> list[dict]:
+        """规范化后的置顶列表 `[{n, id}]`（按置顶顺序，先置顶的在前）。"""
+        raw = self._data.get("pins")
+        if not isinstance(raw, list):
+            raw = []
+        out: list[dict] = []
+        seen: set[int] = set()
+        for item in raw:
+            # 兼容旧格式：v1 直接存 [id, id, ...]
+            if isinstance(item, int) or (isinstance(item, str)
+                                         and item.lstrip("-").isdigit()):
+                item = {"n": None, "id": int(item)}
+            if not isinstance(item, dict):
+                continue
+            try:
+                num = int(item.get("n"))
+            except (TypeError, ValueError):
+                num = None
+            # 本地置顶：{n, id}；非本地置顶：{n, ext, notice}
+            if item.get("ext"):
+                code = str(item.get("ext"))
+                if code in dict.fromkeys(p.get("ext") for p in out):
+                    continue
+                out.append({"n": num, "ext": code,
+                            "notice": dict(item.get("notice") or {})})
+                continue
+            try:
+                nid = int(item.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if nid in seen:
+                continue
+            seen.add(nid)
+            out.append({"n": num, "id": nid})
+        return out
+
+    def _assign_pin_numbers(self, pins: list[dict]) -> bool:
+        """给缺编号的置顶项补号（旧数据升级用）；返回是否有改动。"""
+        used = {p["n"] for p in pins if p.get("n")}
+        changed = False
+        for p in pins:
+            if p.get("n"):
+                continue
+            num = 1
+            while num in used:
+                num += 1
+            p["n"] = num
+            used.add(num)
+            changed = True
+        return changed
 
     def _prune_pins(self) -> int:
-        """丢掉已不存在的通知的置顶标记（记录被 retention 淘汰后）。
+        """丢掉已不存在的通知的置顶项（记录被 retention 淘汰后）。
 
         返回清理条数。不在这里落盘：由调用方按需 save()，避免加载路径产生写盘。
         """
-        pins = self._data.get("pins")
-        if not isinstance(pins, list):
-            self._data["pins"] = []
-            return 0
-        keep: list[int] = []
-        seen: set[int] = set()
-        for v in pins:
-            try:
-                nid = int(v)
-            except (TypeError, ValueError):
-                continue
-            if nid in seen or nid not in self._notices:
-                continue
-            seen.add(nid)
-            keep.append(nid)
+        pins = self._pins()
+        if self._assign_pin_numbers(pins):
+            self._data["pins"] = pins
+        keep = [p for p in pins if p.get("ext") or p.get("id") in self._notices]
         dropped = len(pins) - len(keep)
-        self._data["pins"] = keep
+        if dropped:
+            self._data["pins"] = keep
         return dropped
 
+    def pinned_entries(self) -> list[dict]:
+        """置顶项 `[{n, id}]`（按置顶顺序，先置顶的在前）。"""
+        return self._pins()
+
     def pinned_ids(self, newest_first: bool = False) -> list[int]:
-        """置顶的通知 id（按置顶顺序，最近的在后）。"""
-        ids = [int(v) for v in (self._data.get("pins") or [])
-               if isinstance(v, int) or str(v).lstrip("-").isdigit()]
+        """**本地**置顶的通知 id（跳过外部置顶，它没有本地 id）。
+
+        外部置顶（门户结果）用 `pinned_entries()` 取，那里面带 `ext` 与快照。
+        """
+        ids = [p["id"] for p in self._pins() if isinstance(p.get("id"), int)]
         return list(reversed(ids)) if newest_first else ids
 
     def is_pinned(self, nid) -> bool:
         try:
-            return int(nid) in {int(v) for v in (self._data.get("pins") or [])}
+            nid = int(nid)
         except (TypeError, ValueError):
             return False
+        return any(p.get("id") == nid for p in self._pins())
+
+    def is_pinned_external(self, code) -> bool:
+        """这个外部编号是否已在置顶里。"""
+        code = str(code or "").strip().upper()
+        return any(str(p.get("ext") or "").upper() == code for p in self._pins())
 
     @property
     def pin_count(self) -> int:
-        return len(self._data.get("pins") or [])
+        return len(self._pins())
 
-    def pin(self, nid) -> bool:
-        """置顶一条通知；不存在或已置顶返回 False。立即落盘（置顶必须持久化）。"""
+    def pin_number_of(self, nid) -> int | None:
+        """通知对应的置顶编号 P<n>；没置顶返回 None。"""
         try:
             nid = int(nid)
         except (TypeError, ValueError):
-            return False
+            return None
+        for p in self._pins():
+            if p.get("id") == nid:
+                return p["n"]
+        return None
+
+    def pin_entry(self, num) -> dict | None:
+        """按置顶编号 P<n> 找置顶项。"""
+        try:
+            num = int(str(num).strip().lstrip("Pp"))
+        except (TypeError, ValueError):
+            return None
+        for p in self._pins():
+            if p["n"] == num:
+                return p
+        return None
+
+    def pin(self, nid, *, limit: int = 0, force: bool = False):
+        """置顶一条通知。
+
+        返回：分配的置顶编号（int） / `PIN_LIMIT_REACHED`（已满且没 force）/
+        `None`（不存在或已置顶）。被替换掉的置顶项记在 `last_pin_evicted`。
+
+        编号取**最小空号**：取消置顶后空出来的号会被下一次置顶复用，
+        于是置顶列表始终是紧凑的 P1…Pn（不会越用越大）。
+        立即落盘（置顶必须持久化）。
+        """
+        self.last_pin_evicted = None
+        try:
+            nid = int(nid)
+        except (TypeError, ValueError):
+            return None
         if nid not in self._notices or self.is_pinned(nid):
-            return False
-        self._data.setdefault("pins", []).append(nid)
+            return None
+        pins = self._pins()
+        self._assign_pin_numbers(pins)
+        num, evicted = _add_pin_entry(pins, {"id": nid},
+                                      limit=int(limit or 0), force=bool(force))
+        if num is None:
+            self._data["pins"] = pins      # 补号这类规范化仍要留下
+            return PIN_LIMIT_REACHED
+        self._data["pins"] = pins
+        self.last_pin_evicted = evicted
         self.save()
-        return True
+        return num
+
+    def pin_external(self, notice: dict, *, limit: int = 0,
+                     force: bool = False):
+        """置顶一条**非本地**通知（门户结果）。
+
+        返回值/`last_pin_evicted` 语义与 `pin()` 相同（含上限与 force 替换）。
+        
+
+        快照整条通知：门户结果不在本地库里，编号虽能解码出链接，
+        但要能直接 `get P<n>` 看全文，就得把正文/图片/表格一起留着。
+        已置顶返回 None。
+        """
+        code = external_code(notice)
+        if not code or self.is_pinned_external(code):
+            return None
+        pins = self._pins()
+        self._assign_pin_numbers(pins)
+        snapshot = dict(notice)
+        snapshot.setdefault("external_id", code)
+        num, evicted = _add_pin_entry(
+            pins, {"ext": code, "notice": snapshot},
+            limit=int(limit or 0), force=bool(force))
+        if num is None:
+            self._data["pins"] = pins
+            return PIN_LIMIT_REACHED
+        self._data["pins"] = pins
+        self.last_pin_evicted = evicted
+        self.save()
+        return num
+
+    def update_external_notice(self, fields: dict) -> int:
+        """把 `fields` 合并进该外部通知的**所有引用处**（缓存 + 外部置顶快照）。
+
+        `fields` 必须含 `treeid`/`newsid`（或 `external_id`）以定位是哪一条。
+        返回更新了几处。立即落盘（摘要这类信息不该丢）。
+        """
+        code = str(fields.get("external_id") or "").strip()
+        if not code:
+            code = external_code(fields)
+        if not code:
+            return 0
+        patch = dict(fields)
+        patch.pop("external_id", None)
+        changed = 0
+        # ⚠️ 必须改**原始** `_data["pins"]` 里的 dict：`_pins()` 每次调用都会
+        # 新建一批 dict（规范化产物），改它的返回值为等于什么都没做。
+        ext = self._externals()
+        item = ext.get(code)
+        if isinstance(item, dict) and isinstance(item.get("notice"), dict):
+            item["notice"].update(patch)
+            item["ts"] = time.time()
+            changed += 1
+        for entry in self._data.get("pins") or []:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("ext") or "").upper() != code.upper():
+                continue
+            notice = entry.get("notice")
+            if isinstance(notice, dict):
+                notice.update(patch)
+                changed += 1
+        if changed:
+            self.save()
+        return changed
 
     def unpin(self, nid) -> bool:
-        """取消置顶；本来就没置顶返回 False。立即落盘。"""
+        """按**通知编号**或**外部编号**取消置顶；没有置顶返回 False。立即落盘。"""
+        text = str(nid or "").strip()
+        if is_external_code(text):
+            code = text.upper()
+            pins = self._pins()
+            keep = [p for p in pins
+                    if str(p.get("ext") or "").upper() != code]
+            if len(keep) == len(pins):
+                return False
+            self._data["pins"] = keep
+            self.save()
+            return True
         try:
             nid = int(nid)
         except (TypeError, ValueError):
             return False
-        pins = self._data.get("pins") or []
-        if nid not in pins:
+        pins = self._pins()
+        keep = [p for p in pins if p.get("id") != nid]
+        if len(keep) == len(pins):
             return False
-        self._data["pins"] = [v for v in pins if int(v) != nid]
+        self._data["pins"] = keep
         self.save()
         return True
+
+    def unpin_number(self, num) -> bool:
+        """按**置顶编号 P<n>** 取消置顶。立即落盘。"""
+        entry = self.pin_entry(num)
+        if not entry:
+            return False
+        return self.unpin(entry["id"])
 
     def clear_pins(self) -> int:
         """清空所有置顶，返回清掉的条数。立即落盘。"""
-        n = len(self._data.get("pins") or [])
+        n = len(self._pins())
         if n:
             self._data["pins"] = []
             self.save()
@@ -294,11 +562,102 @@ class StateStore:
             self.save()
         return dropped
 
+    # ---------------- 非本地编号（门户结果，可解码） ----------------
+    #
+    # 编号形如 `E<treeid>-<newsid>`（例：`E1759-142679`），**从编号本身就能还原
+    # 原文链接**（门户链接的 `wbtreeid`/`wbnewsid` 正是这两个值），所以编号不依赖
+    # 任何映射表就能长期使用；`externals` 里只是额外缓存标题/日期，省一次抓取。
+    #
+    # 与本地编号（纯数字）前缀不同（E / P），两个空间不会撞号。
+
+    def _externals(self) -> dict:
+        ext = self._data.get("externals")
+        if not isinstance(ext, dict):
+            ext = {}
+            self._data["externals"] = ext
+        return ext
+
+    def external_put(self, notice: dict) -> str:
+        """登记一条非本地通知，返回它的可解码编号 `E<treeid>-<newsid>`。
+
+        同一通知重复登记**返回同一编号**（编号由 treeid/newsid 决定，天然幂等）。
+        """
+        code = external_code(notice)
+        if not code:
+            return ""
+        ext = self._externals()
+        ext[code] = {"notice": dict(notice), "ts": time.time()}
+        self.save()
+        return code
+
+    def external_put_many(self, notices: list) -> list[str]:
+        """批量登记非本地通知，返回与入参等长的编号列表（只落一次盘）。
+
+        搜索一页有 10 条，逐条 `external_put` 会写 10 次 state.json —— 批量入口
+        把"写盘"收敛成一次。
+        """
+        ext = self._externals()
+        out: list[str] = []
+        changed = False
+        now = time.time()
+        for notice in notices or ():
+            data = notice if isinstance(notice, dict) else (
+                notice.as_dict() if hasattr(notice, "as_dict") else {})
+            code = external_code(data)
+            if not code:
+                out.append("")
+                continue
+            ext[code] = {"notice": dict(data), "ts": now}
+            out.append(code)
+            changed = True
+        if changed:
+            self.save()
+        return out
+
+    def external_get(self, code) -> dict | None:
+        """按 `E<treeid>-<newsid>` 取非本地通知的缓存元数据（可能没有）。"""
+        item = self._externals().get(str(code or "").strip().upper())
+        if not isinstance(item, dict):
+            return None
+        notice = item.get("notice")
+        return dict(notice) if isinstance(notice, dict) else None
+
+    def external_sweep(self, *, ttl: float = 7 * 86400,
+                       max_items: int = 500) -> int:
+        """回收过期的非本地元数据缓存，返回回收条数。立即落盘。
+
+        ⚠️ 只是清掉"标题/日期"缓存；编号本身仍可用（能解码出链接），
+        所以即便被回收，`get E…`/`pin E…` 依然工作（最多重新抓一次详情）。
+        """
+        ext = self._externals()
+        if not ext:
+            return 0
+        now = time.time()
+        drop: list[str] = []
+        for code, item in ext.items():
+            try:
+                ts = float((item or {}).get("ts") or 0)
+            except (TypeError, ValueError):
+                ts = 0
+            if not ts or now - ts > ttl:
+                drop.append(code)
+        if len(ext) - len(drop) > max_items:
+            alive = [(c, float((i or {}).get("ts") or 0))
+                     for c, i in ext.items() if c not in drop]
+            alive.sort(key=lambda kv: kv[1])          # 最旧的先丢
+            drop += [c for c, _ in alive[:max(0, len(alive) - max_items)]]
+        if not drop:
+            return 0
+        for code in drop:
+            ext.pop(code, None)
+        self.save()
+        return len(drop)
+
     # ---------------- 检索 ----------------
 
     def search(self, keyword: str, *, limit: int = 10, page: int = 1,
                date: str = "") -> tuple[list[dict], int]:
-        """按关键词检索通知，返回 `(当页记录, 命中总数)`（最新在前）。
+        """按关键词检索**本地**通知，返回 `(当页记录, 命中总数)`（最新在前）。
 
         匹配范围：标题、AI 摘要、正文、发布单位、通知编号。
         `date` 非空时只保留该日期（`YYYY-MM-DD`，与记录里的 `date` 同格式）。

@@ -88,8 +88,8 @@
     /buptnews del [group|user] [号]      移除目标
     /buptnews on | off        开关推送
     /buptnews interval [时长] 设置间隔，如 10m / 600
-    /buptnews search <关键词> [每页] [页码] [日期]   本地库 + 信息门户
-    /buptnews pin|unpin [编号 ...]                 置顶（持久化在 state.json）
+    /buptnews search <关键词> [每页] [页码] [日期]   本地库 + 信息门户（门户结果给 E 编号）
+    /buptnews pin|unpin [编号|E编号|P编号 ...]      置顶（独立编号 P1/P2…，存 state.json）
     /buptnews images [stats|backfill|download|retry] [数量]
                               图片缓存：统计 / 补齐历史图片 / 只下图片 / 重试失败的下载
     /buptnews bind [user|group] <号> [list|add|del]
@@ -123,7 +123,9 @@ from datetime import datetime, time as dtime
 from pathlib import Path
 from typing import Optional
 
-from napcat import GROUP_AT_HINT, MessageChain, PluginBase
+from napcat.command import GROUP_AT_HINT
+from napcat.message import MessageChain
+from napcat.plugin import PluginBase
 
 # @全体成员 次数用尽时追加的醒目提示（提醒同学注意查收，而不是漏看）
 _AT_ALL_EXHAUSTED_HINT = (
@@ -256,7 +258,8 @@ from .schemas import (
     SyncSchema,
     UnpinSchema,
 )
-from .store import StateStore
+from .store import (PIN_LIMIT_REACHED, StateStore, decode_external,
+                   external_code, external_url, is_external_code)
 from .summarize import Summarizer, fallback_summary
 from .weather import WeatherClient, weather_line
 
@@ -1157,6 +1160,20 @@ class BuptNewsPlugin(PluginBase):
         except (TypeError, ValueError):
             return 25.0
 
+    def _pin_limit(self) -> int:
+        """置顶上限（0 = 不限）。"""
+        try:
+            return max(0, int(self.config.get("pin_limit", 3) or 0))
+        except (TypeError, ValueError):
+            return 3
+
+    def _pin_evicted_text(self, evicted: dict | None) -> str:
+        """被替换掉的置顶项的一句话描述（给用户看）。"""
+        if not evicted:
+            return ""
+        text = self._pin_line(evicted, width=24)
+        return f"{text}" if text else f"P{evicted.get('n')}"
+
     def _retry_budget(self) -> float:
         """补试的总时间预算（秒），0 = 不限。"""
         try:
@@ -1327,23 +1344,31 @@ class BuptNewsPlugin(PluginBase):
         """这批推送里是否**至少有一条**发给学生的通知（决定要不要 @全体成员）。"""
         return any(self._for_students_of(r) for r in recs)
 
-    async def _retry_summary_for(self, rec: dict) -> bool:
-        """用户调取**单条**通知（/buptnews get）时补试摘要。
+    async def _summarize_notice(self, rec: dict, *, external: bool = False,
+                                reason: str = "") -> bool:
+        """给**单条**通知补 AI 摘要（本地记录或非本地通知都走这里）。
 
-        交互路径要快，所以用 `summarize.retry_on_notice`（默认 2 次）而不是同步那 5 次；
-        成功会把摘要与学生判定写回库里，下次 `/buptnews list` 就能看到。
-        返回是否拿到 AI 摘要。
+        交互路径要快，所以用 `summarize.retry_on_notice`（默认 2 次）而不是同步那 5 次。
+        成功后写回：本地记录进 notices.jsonl；非本地通知进
+        `external_notices` 缓存**以及**它的置顶快照（`update_external_notice`）。
+
+        摘要不可得时保持 `summary_ai=False`（调用方据此不显示🤖行），
+        绝不写入"标题截断"这种假摘要。
         """
         if self._summarizer is None or not self._summarizer.enabled:
             return False
         if not str(rec.get("newsid", "")):
+            # 没有 newsid 就没法对应到 AI 的返回（它按 newsid 回包）
             return False
         try:
             attempts = int(self._summary_cfg("retry_on_notice", 2) or 0) + 1
         except (TypeError, ValueError):
             attempts = 3
+        if not reason:
+            reason = ("外部 " + str(rec.get("external_id") or "")) if external \
+                else f"调取 #{rec.get('id')}"
         got = await self._summarize_with_retry([rec], attempts=attempts,
-                                               reason=f"调取 #{rec.get('id')}")
+                                               reason=reason)
         d = got.get(str(rec.get("newsid", "")))
         if d is None:
             return False
@@ -1351,10 +1376,35 @@ class BuptNewsPlugin(PluginBase):
         rec["summary_ai"] = True
         rec["for_students"] = bool(d.for_students)
         rec["student_ai"] = True
-        self._store.update_notice(rec["id"], summary=d.summary, summary_ai=True,
-                                  for_students=bool(d.for_students),
-                                  student_ai=True)
+        if external:
+            fields = dict(rec)
+            fields.setdefault("external_id", external_code(rec))
+            self._store.update_external_notice(fields)
+        elif rec.get("id") is not None:
+            self._store.update_notice(rec["id"], summary=d.summary,
+                                      summary_ai=True,
+                                      for_students=bool(d.for_students),
+                                      student_ai=True)
         return True
+
+    async def _retry_summary_for(self, rec: dict) -> bool:
+        """本地记录的单条摘要补试（保留旧入口，语义不变）。"""
+        return await self._summarize_notice(rec, external=False)
+
+    async def _summarize_external(self, notice: dict) -> dict:
+        """给非本地通知补摘要，返回**改好的那份 dict**（无论成功与否）。
+
+        置顶门户结果时用：编号是 E 开头、内容来自门户，本地库里没有它，
+        所以摘要要直接写进通知本身 + 置顶快照。
+        """
+        rec = dict(notice or {})
+        if rec.get("summary_ai") and rec.get("summary"):
+            return rec
+        try:
+            await self._summarize_notice(rec, external=True, reason="置顶外部通知")
+        except Exception as e:  # noqa: BLE001 - 摘要失败不该让置顶失败
+            self.logger.warning("[bupt_news] 外部通知摘要失败：%s", e)
+        return rec
 
     async def _backfill_ai_results(self) -> int:
         """补试的**统一入口**（每轮同步最多调用一次，且必须在推送之后）。
@@ -1569,6 +1619,148 @@ class BuptNewsPlugin(PluginBase):
             for k, _ in oldest:
                 self._portal_search_cache.pop(k, None)
         return got, ""
+
+    @staticmethod
+    def _wants_force(raw: str) -> bool:
+        """原始命令文本里是否有**裸** `--force` 或 `-f`。
+
+        框架的解析器只认 `--key=value`；裸 `--force` 会被当成位置参数
+        （落进 variadic 的 ids），所以这里从原文里识别，命令层据此补上。
+        """
+        text = str(raw or "")
+        return bool(re.search(r"(?:^|\s)(?:--force(?:=\s*(?:true|1|yes|on))?|-[fF])(?=\s|$)",
+                              text))
+
+    @staticmethod
+    def _strip_force(raw: str) -> str:
+        """把裸 `--force` / `-f` 从原文里剥掉（避免它混进位置参数）。"""
+        text = str(raw or "")
+        return re.sub(r"(?<=\s)(?:--force(?:=\s*(?:true|1|yes|on))?|-[fF])(?=\s|$)",
+                      "", text).strip()
+
+    @staticmethod
+    def _parse_tokens(raw) -> list[str]:
+        """把 `pin 12 E1759-142679` / `pin 12,34` 拆成去重保序的 token 列表。
+
+        与 `_parse_ids` 的区别：这里**保留非数字编号**（`E…`/`P…`），
+        由调用方再按类型解析 —— 只用数字解析会把 E 编号直接丢掉。
+        """
+        if raw is None:
+            return []
+        items = raw if isinstance(raw, (list, tuple)) else [raw]
+        out: list[str] = []
+        seen: set[str] = set()
+        for chunk in items:
+            for part in re.split(r"[,，;；\s]+", str(chunk or "")):
+                part = part.strip().lstrip("#").upper()
+                if not part:
+                    continue
+                # 裸 `--force` / `-f` 会被解析器当成位置参数，这里丢掉
+                # （真正的 force 由 `_wants_force(raw)` 从原文识别）
+                if part in ("--FORCE", "-F") or part.startswith("--FORCE="):
+                    continue
+                # 纯数字、E 编号、P 编号都收；其它丢弃
+                if part.isdigit() or is_external_code(part) or re.fullmatch(
+                        r"P\d{1,6}", part):
+                    if part not in seen:
+                        seen.add(part)
+                        out.append(part)
+        return out
+
+    def _pin_line(self, entry: dict | None, *, width: int = 40) -> str:
+        """置顶列表的一行：**只显示 `P<n>` + 概要**。
+
+        概要 = AI 摘要（有就优先）；没有摘要时退回标题、再不行退回链接尾段。
+        刻意**不显示** E 编号 / 日期 / 本地通知编号 —— 置顶区是给人快速扫的，
+        编号（E/本地）在需要操作时再说，混在一行里只会把概要挤掉。
+        """
+        if not entry:
+            return ""
+        num = entry.get("n")
+        if entry.get("ext"):
+            notice = entry.get("notice") or {}
+            text = (str(notice.get("summary") or "")[:width]
+                    if notice.get("summary_ai") else "")
+            if not text:
+                text = str(notice.get("title") or "")[:width]
+            if not text:
+                text = entry["ext"]
+        else:
+            rec = self._store.get_notice(entry.get("id")) or {}
+            text = (str(rec.get("summary") or "")[:width]
+                    if rec.get("summary_ai") else "")
+            if not text:
+                text = str(rec.get("title") or "")[:width]
+            if not text:
+                text = f"#{entry.get('id')}"
+        return f"P{num} 📌 {text}"
+
+    async def _pin_one(self, token: str, *, force: bool = False
+                       ) -> tuple[str | None, int | None]:
+        """把单个 token 置顶，返回 `(显示标签 | None, 置顶编号 | None)`。
+
+        * `None, None` → 无法置顶（编号不存在 / E 编号抓取失败）
+        * `标签, None` → 已经在置顶里
+        * `标签, n`    → 刚置顶，编号 P<n>
+        """
+        token = str(token or "").strip().upper()
+        if not token:
+            return None, None
+        if is_external_code(token):
+            # 非本地：编号自带链接，先看缓存元数据，没有再抓一次详情
+            if self._store.is_pinned_external(token):
+                return token, None
+            notice = self._store.external_get(token) or {}
+            if not notice.get("body"):
+                url = external_url(token)
+                if self._portal is None:
+                    self._pin_fail_reason = "门户未就绪"
+                    return None, None
+                try:
+                    d = await self._portal.fetch_detail(url)
+                except Exception as e:  # noqa: BLE001
+                    self.logger.warning("[bupt_news] 置顶 %s 时抓取失败：%s", token, e)
+                    self._pin_fail_reason = f"抓取失败（{type(e).__name__}）"
+                    return None, None
+                # ⚠️ 必须把 treeid/newsid 一起带上：外部编号就是从这两个字段
+                # 推出来的（external_code），漏了会让编号算成空串、置顶失败。
+                pair = decode_external(token) or ("", "")
+                notice = {
+                    "title": d.get("title") or notice.get("title") or "（无标题）",
+                    "dept": d.get("dept") or "", "date": d.get("date") or "",
+                    "body": d.get("body") or "", "url": url,
+                    "images": d.get("images") or [],
+                    "tables": d.get("tables") or [],
+                    "treeid": pair[0], "newsid": pair[1],
+                    "external_id": token, "student_ai": False,
+                }
+            pair = decode_external(token) or ("", "")
+            notice.setdefault("treeid", pair[0])
+            notice.setdefault("newsid", pair[1])
+            notice.setdefault("external_id", token)
+            # E 编号来自门户、本地库里没有这条：置顶时就补一条 AI 摘要，
+            # 让置顶项在 `pin` 列表和 `get P<n>` 里都有摘要可看。
+            notice = await self._summarize_external(notice)
+            num = self._store.pin_external(
+                notice, limit=self._pin_limit(), force=force)
+            if num == PIN_LIMIT_REACHED:
+                self._pin_fail_reason = "pin_limit"
+                return None, None
+            return token, num
+        try:
+            nid = int(token)
+        except (TypeError, ValueError):
+            return None, None
+        if self._store.get_notice(nid) is None:
+            self._pin_fail_reason = f"本地库没有 #{nid}"
+            return None, None
+        if self._store.is_pinned(nid):
+            return f"#{nid}", None
+        num = self._store.pin(nid, limit=self._pin_limit(), force=force)
+        if num == PIN_LIMIT_REACHED:
+            self._pin_fail_reason = "pin_limit"
+            return None, None
+        return f"#{nid}", num
 
     @staticmethod
     def _parse_ids(raw) -> list[int]:
@@ -2144,12 +2336,17 @@ class BuptNewsPlugin(PluginBase):
             chunk = newest_first[(page - 1) * size: page * size]
             lines = [f"📋 通知编号（第 {page}/{pages} 页 · 共 {total} 条 · 最新在前）", ""]
             # 置顶条目**每页都显示在最前**：置顶的意义就是"不用翻页也能看到"
-            pinned = [i for i in self._store.pinned_ids(newest_first=True)
-                      if self._store.get_notice(i)]
-            if pinned:
-                lines.append(f"📌 置顶（{len(pinned)}）")
-                for i in pinned:
-                    lines.append(self._rec_line(i, prefix="📌 "))
+            # 置顶区：每行只有 `P<n>` + 概要（外部置顶先补齐摘要再渲染）
+            entries = list(reversed(self._store.pinned_entries()))
+            if entries:
+                for e in entries:
+                    if e.get("ext") and not (e.get("notice") or {}).get("summary_ai"):
+                        notice = await self._summarize_external(
+                            dict(e.get("notice") or {}))
+                        if notice.get("summary_ai"):
+                            e["notice"] = notice
+                lines.append(f"📌 置顶（{len(entries)}）")
+                lines += [self._pin_line(e) for e in entries]
                 lines.append("")
             for i in chunk:
                 lines.append(self._rec_line(i))
@@ -2163,66 +2360,111 @@ class BuptNewsPlugin(PluginBase):
                 nav.append("✅ 已是最后一页")
             lines.append(" · ".join(nav))
             lines.append("💡 /buptnews get <编号> 查看全文 · "
-                         "/buptnews search <关键词> 搜索 · "
-                         "/buptnews pin <编号> 置顶")
+                         "/buptnews search <关键词> 搜索")
             return "\n".join(lines)
 
         @reg("buptnews.pin", permission="superuser", scope="private",
-             schema=PinSchema, description="置顶通知（不带参数查看当前置顶）")
-        async def cmd_pin(params):
-            ids = self._parse_ids(getattr(params, "ids", None))
-            if not ids:
-                pins = [i for i in self._store.pinned_ids(newest_first=True)
-                        if self._store.get_notice(i)]
-                if not pins:
+             schema=PinSchema,
+             description="置顶通知（编号或 E 编号；不带参数查看当前置顶）")
+        async def cmd_pin(params, packet=None):
+            # 裸 `--force` / `-f` 由框架当作位置参数，这里从原文补回来
+            raw = getattr(packet, "raw", "") if packet is not None else ""
+            tokens = self._parse_tokens(getattr(params, "ids", None))
+            force = (bool(getattr(params, "force", False))
+                     or self._wants_force(raw))
+            if not tokens:
+                entries = list(reversed(self._store.pinned_entries()))
+                if not entries:
                     return ("📌 当前没有置顶通知\n"
-                            "💡 /buptnews pin <编号> 置顶（可多个：pin 12 34）")
-                lines = [f"📌 置顶通知（{len(pins)}）", ""]
-                lines += [self._rec_line(i, prefix="📌 ") for i in pins]
-                lines += ["", "💡 /buptnews unpin <编号> 取消置顶"]
+                            "💡 /buptnews pin <编号|E编号> 置顶（可多个：pin 12 E1759-142679）")
+                lines = [f"📌 置顶通知（{len(entries)}）", ""]
+                # 外部置顶若还没摘要（置顶时 AI 恰好不可用），在这里补一次，
+                # 补上就立即显示 —— 否则列表里永远只有标题
+                for e in entries:
+                    if e.get("ext") and not (e.get("notice") or {}).get("summary_ai"):
+                        notice = await self._summarize_external(
+                            dict(e.get("notice") or {}))
+                        if notice.get("summary_ai"):
+                            e["notice"] = notice
+                lines += [self._pin_line(e) for e in entries]
+                lines += ["", "💡 /buptnews unpin P<编号> 取消某条 · "
+                              "unpin 清空全部"]
                 return "\n".join(lines)
 
-            ok, already, missing = [], [], []
-            for nid in ids:
-                if self._store.get_notice(nid) is None:
-                    missing.append(nid)
-                elif self._store.is_pinned(nid):
-                    already.append(nid)
-                elif self._store.pin(nid):
-                    ok.append(nid)
+            ok, already, missing, full = [], [], [], []
+            for tok in tokens:
+                self._pin_fail_reason = ""
+                label, num = await self._pin_one(tok, force=force)
+                if self._pin_fail_reason == "pin_limit":
+                    full.append(tok)
+                    continue
+                # ⚠️ 先判失败再判 already：成功返回 (label, 编号)，
+                # already 返回 (label, None)，失败返回 (None, None)。
+                # 反过来写会把"失败"误报成"已经置顶过"。
+                if label is None:
+                    missing.append(tok)
+                elif num is None:
+                    already.append(label)
+                else:
+                    ok.append((label, num))
             lines = []
             if ok:
-                lines.append(f"📌 已置顶 {len(ok)} 条：" +
-                             "、".join(f"#{i}" for i in ok))
+                lines.append(f"📌 已置顶 {len(ok)} 条：" + "、".join(
+                    f"P{n}（{label}）" for label, n in ok))
             if already:
-                lines.append(f"ℹ️ 已在置顶中：{'、'.join(f'#{i}' for i in already)}")
+                lines.append(f"ℹ️ 已在置顶中：{'、'.join(already)}")
+            if full:
+                lines.append(
+                    f"⚠️ 置顶已满（上限 {self._pin_limit()} 条），未置顶："
+                    f"{'、'.join(full)}\n"
+                    "  先 /buptnews unpin P<n> 腾位置，"
+                    f"或加 --force 替换最早置顶的那条")
             if missing:
-                lines.append(f"❓ 未找到：{'、'.join(f'#{i}' for i in missing)}"
-                             "（可能已超出保留范围）")
+                lines.append(f"❓ 无法置顶：{'、'.join(missing)}"
+                             "（本地编号不存在，或 E 编号格式不对）")
+            evicted = getattr(self._store, "last_pin_evicted", None)
             if ok:
                 lines.append("")
-                lines += [self._rec_line(i, prefix="📌 ") for i in ok]
-                lines.append("\n💡 置顶已写入 state.json，重启/重载后仍然有效")
+                lines += [self._pin_line(self._store.pin_entry(n))
+                          for _, n in ok if self._store.pin_entry(n)]
+                if evicted:
+                    lines.append(f"\n♻️ 已替换最早置顶的：{self._pin_evicted_text(evicted)}")
+                lines.append("\n💡 置顶编号 P1/P2… 独立于通知编号，"
+                             "取消后空号会被复用")
             else:
-                lines.append("\n💡 /buptnews pin <编号> 置顶，"
-                             "/buptnews unpin <编号> 取消")
+                lines.append("\n💡 /buptnews pin <编号|E编号> 置顶，"
+                             "/buptnews unpin P<n> 取消")
             return "\n".join(lines)
 
         @reg("buptnews.unpin", permission="superuser", scope="private",
-             schema=UnpinSchema, description="取消置顶（不带参数=全部取消）")
+             schema=UnpinSchema,
+             description="取消置顶（P置顶编号/通知编号/E编号；不带参数=全部取消）")
         async def cmd_unpin(params):
-            ids = self._parse_ids(getattr(params, "ids", None))
-            if not ids:
+            tokens = self._parse_tokens(getattr(params, "ids", None))
+            # 兼容短选项：`-f` 在 schema 里是 kwargs 的 `f`，不会映射到 force
+            force = bool(getattr(params, "force", False)) or bool(
+                params.get("f", False))
+            if not tokens:
                 n = self._store.clear_pins()
                 return (f"🧹 已取消全部置顶（{n} 条）" if n
                         else "📌 当前没有置顶通知")
-            ok = [i for i in ids if self._store.unpin(i)]
-            not_pinned = [i for i in ids if i not in ok]
+            ok, not_pinned = [], []
+            for tok in tokens:
+                # P 前缀：按**置顶编号**取消（unpin 本身只认通知编号/E 编号，
+                # 所以这里要先解析成置顶项再摘）
+                entry = self._store.pin_entry(tok) if re.fullmatch(
+                    r"P\d{1,6}", tok.upper()) else None
+                if entry and self._store.unpin_number(entry["n"]):
+                    ok.append(tok)
+                elif not entry and self._store.unpin(tok):
+                    ok.append(tok)
+                else:
+                    not_pinned.append(tok)
             lines = []
             if ok:
-                lines.append(f"✅ 已取消置顶：{'、'.join(f'#{i}' for i in ok)}")
+                lines.append(f"✅ 已取消置顶：{'、'.join(ok)}")
             if not_pinned:
-                lines.append(f"ℹ️ 本来就没置顶：{'、'.join(f'#{i}' for i in not_pinned)}")
+                lines.append(f"ℹ️ 本来就没置顶：{'、'.join(not_pinned)}")
             lines.append(f"\n📌 当前还有 {self._store.pin_count} 条置顶")
             return "\n".join(lines)
 
@@ -2282,15 +2524,24 @@ class BuptNewsPlugin(PluginBase):
 
             if portal is not None and portal.get("items"):
                 lines.append("🌐 信息门户（含本地库里没有的旧通知）")
-                for n in portal["items"]:
-                    # 本地库里已有的标一下，用户能直接 get 编号
+                # 给每条门户结果发一个**可解码编号**（E<treeid>-<newsid>），
+                # 直接 get/pin 这个编号即可，不用再贴长链接。
+                codes = self._store.external_put_many(portal["items"]) \
+                    if hasattr(self._store, "external_put_many") else []
+                for idx, n in enumerate(portal["items"]):
+                    code = codes[idx] if idx < len(codes) else ""
                     local_id = self._local_id_for(n)
-                    tag = f"#{local_id}" if local_id else "  "
-                    mark = "📌" if local_id and self._store.is_pinned(local_id) else "  "
+                    pinned = (local_id and self._store.is_pinned(local_id)) or \
+                        (code and self._store.is_pinned_external(code))
+                    mark = "📌" if pinned else "  "
                     date_s = f"{n.date} " if n.date else ""
-                    lines.append(f"{mark} {tag} {date_s}{n.title[:40]}")
-                    lines.append(f"     └ /buptnews get {n.url}")
+                    # 本地已有就用本地编号（能进 list/pin 同一套编号空间），
+                    # 否则用 E 编号
+                    tag = f"#{local_id}" if local_id else (code or "  ")
+                    lines.append(f"{mark} {tag} {date_s}{n.title[:38]}")
                 lines.append("")
+                lines.append("💡 门户结果用 E 编号引用："
+                             "get E1759-142679 · pin E1759-142679")
 
             if portal_err:
                 lines.append(f"⚠️ 门户检索失败（已只显示本地结果）：{portal_err}")
@@ -2305,16 +2556,63 @@ class BuptNewsPlugin(PluginBase):
                            f" {size} {page - 1}")
             if nav:
                 lines.append(" · ".join(nav))
-            lines.append("💡 get 支持贴原文链接（门户结果没有本地编号）")
+            lines.append("💡 get/pin 支持本地编号、E 编号（门户）与 P 编号（置顶）")
             return "\n".join(lines)
 
         # permission="" 同样是显式覆盖：仅私聊，但任何私聊用户都能查全文
         @reg("buptnews.get", permission="", scope="private",
-             schema=GetSchema, description="按编号查看通知全文与原文链接")
+             schema=GetSchema,
+             description="按编号查看通知全文（本地编号 / E编号 / P置顶编号 / 链接）")
         async def cmd_get(params, event):
             raw = str(getattr(params, "id", "") or "").strip()
-            # 既支持编号，也支持直接贴原文链接（门户检索结果不在本地库里，
-            # 没有本地编号 —— 搜索结果会把链接一起给出来，用户能直接点/贴）
+            # 支持四种引用：
+            #   476                     本地编号
+            #   E1759-142679            门户结果编号（**自带** treeid/newsid，可直接还原链接）
+            #   P2                      置顶编号
+            #   http://…                原文链接
+            # 先按置顶编号查（P2），因为没有别的空间用 P 前缀，不会撞车。
+            pin_entry = self._store.pin_entry(raw) if raw[:1].upper() == "P" else None
+            if pin_entry:
+                if pin_entry.get("ext"):
+                    notice = dict(pin_entry.get("notice") or {})
+                    # 置顶时摘要可能没拿到（AI 暂时不可用）→ 这次调取再试一次
+                    notice = await self._summarize_external(notice)
+                    return await self._render_notice(
+                        notice, prefix=f"P{pin_entry['n']} {pin_entry['ext']} ")
+                nid = pin_entry.get("id")
+                rec = self._store.get_notice(nid)
+                if not rec:
+                    return f"❓ 置顶 P{pin_entry['n']} 的通知已超出保留范围"
+                return await self._render_notice(
+                    rec, prefix=f"P{pin_entry['n']} ")
+
+            if is_external_code(raw):
+                # 编号自带链接 → 不依赖任何缓存就能抓取；有缓存元数据则先拿来用
+                url = external_url(raw)
+                cached = self._store.external_get(raw) or {}
+                if self._portal is None:
+                    return "门户客户端未就绪，稍后再试"
+                try:
+                    d = await self._portal.fetch_detail(url)
+                except PortalAuthError:
+                    return "❌ 门户会话失效，稍后再试"
+                except Exception as e:  # noqa: BLE001
+                    return f"❌ 打开 {raw} 失败：{type(e).__name__}: {e}"
+                rec = {
+                    "title": d.get("title") or cached.get("title") or "（无标题）",
+                    "dept": d.get("dept") or cached.get("dept") or "",
+                    "date": d.get("date") or cached.get("date") or "",
+                    "body": d.get("body") or "", "url": url,
+                    "images": d.get("images") or [],
+                    "tables": d.get("tables") or [],
+                    "external_id": raw,
+                    # 门户临时记录没有"是否给学生"的 AI 判定 → 按学生处理（不误标）
+                    "student_ai": False,
+                }
+                # E 编号来自门户：正文到手后补一条 AI 摘要（与置顶时同一条路径）
+                rec = await self._summarize_external(rec)
+                return await self._render_notice(rec, prefix=f"🔗 {raw} ")
+
             if raw.lower().startswith(("http://", "https://")):
                 if self._portal is None:
                     return "门户客户端未就绪，稍后再试"
@@ -2329,14 +2627,15 @@ class BuptNewsPlugin(PluginBase):
                     "dept": d.get("dept") or "", "date": d.get("date") or "",
                     "body": d.get("body") or "", "url": raw,
                     "images": d.get("images") or [], "tables": d.get("tables") or [],
-                    # 门户临时记录没有"是否给学生"的 AI 判定 → 按学生处理（不误标）
                     "student_ai": False,
                 }
                 return await self._render_notice(rec, prefix="🔗 ")
+
             try:
                 nid = int(raw)
             except (TypeError, ValueError):
-                return "❓ 请给通知编号或原文链接：/buptnews get <编号|链接>"
+                return ("❓ 请给编号或链接：/buptnews get <编号|E编号|P置顶编号|链接>\n"
+                        "💡 E 编号来自 /buptnews search 的门户结果")
             rec = self._store.get_notice(nid)
             if not rec:
                 return (f"❓ 未找到 {nid}"
