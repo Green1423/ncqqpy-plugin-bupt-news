@@ -165,7 +165,7 @@ cp .env.example .env      # 填 BUPT_PORTAL_PASSWORD 与 DEEPSEEK_API_KEY
 |------|------|------|------|
 | `/buptnews` | 私聊 / 群聊 | 无（命令组本体） | 帮助：打印全部子命令用法 |
 | `/buptnews status` | 仅私聊 | **superuser** | 状态：开关、间隔、免打扰窗口、目标数、上次同步、上次早报、累计推送、可查询条数 |
-| `/buptnews list [页码]` | 私聊 / 群聊 | 无 | 分页列出通知编号（最新在前，每页 `list_page_size` 条；标注 `第 x/y 页，共 N 条`）|
+| `/buptnews list [页码] [--scope=notices\|acts\|all]` | 私聊 / 群聊 | 无 | 分页列出**置顶 + 通知编号**（默认 `notices`，每页 `list_page_size` 条）。`--scope=acts` 只看第二课堂活动（`-a` 简写），`--scope=all` 两者一起 |
 | `/buptnews get <编号\|E编号\|P编号\|链接>` | 仅私聊 | 无 | 查看通知全文：标题/部门/日期 + **正文图文按原页面排版** + 原文链接；**过长自动拆成多条消息**。也接受**原文链接**（门户检索结果没有本地编号，直接贴链接即可看全文）|
 | `/buptnews search <关键词> [每页] [页码] [日期]` | 仅私聊 | 无 | **搜索本地库 + 信息门户**。本地：标题/摘要/正文/单位/编号（子串、不区分大小写）；门户：标题或全文（`--content=false` 只搜标题，走门户自己的检索）。`--source=local\|portal` 可只搜一侧 |
 | `/buptnews pin [编号\|E编号 ...] [force]` | 仅私聊 | **superuser** | 置顶通知（钉在 `list` 顶部，**每页都显示**）；可多个（`pin 12 34` / `pin 12,E1759-142679`）；不带参数=查看当前置顶。每条置顶分配**独立编号 P1/P2…**。**上限 `pin_limit`（默认 3）**：满了会拒绝并提示；加 `--force`（或 `-f`）才替换**最早置顶**的那条。**持久化在 `state.json` 的 `pins`** |
@@ -699,6 +699,123 @@ AI 摘要在生成摘要的同时判定该通知**是否面向学生**（本科�
 >
 > 另一坑：框架解析器只认 `--key=value`，**裸 `--force` 会被当成位置参数**。
 > 所以 `pin` 从 `packet.raw` 里额外识别裸 `--force` / `-f`，并把它们从 `ids` 里剔除。
+
+---
+
+### 7.7 第二课堂活动同步
+
+在通知之外，可选地把「北邮第二课堂」的活动也同步进来。协议见
+`plugins/bupt_news/afterclass/API.md`（由小程序产物逆向整理）。
+
+**为什么不能自动登录**：`POST /api/v1/auth/sessions` 在需要人机校验时返回
+419/420，验证码页 `/mp-captcha.html` 是商业反爬控件（瑞数 `$_ts` 混淆）。
+绕过它属于规避访问控制，所以本实现**只接受你自己提供的 JWT**，不实现登录。
+
+取得 token（网页版，推荐）：
+
+1. 浏览器打开 <https://dekt.bupt.edu.cn/>，用学号密码登录（验证码由你自己输入）；
+2. `F12` → Console → 执行：
+
+   ```js
+   localStorage["secondclass.tokenv3"]
+   ```
+
+   打印出来的 `"eyJ..."` 就是 JWT（连引号一起复制也行，程序会清洗）；
+   也可以走 Application → Local Storage → 键 `secondclass.tokenv3`。
+
+小程序里则是 Storage 的 `tokenv3` 键（值相同）。
+JWT 的 `exp` 是过期时间 —— 过期后重新登录再取一份覆盖即可。
+
+放置位置（二选一）：
+
+```bash
+# ① 文件（推荐；插件目录下，惰性读取）
+echo '<JWT>' > plugins/bupt_news/afterclass/token.txt
+# ② 环境变量
+export DEKT_TOKEN='<JWT>'
+```
+
+先用探针确认能拉到数据：
+
+```bash
+./venv-arm/bin/python -B tools/dekt_probe.py          # 打印归一化后的前 10 条
+./venv-arm/bin/python -B tools/dekt_probe.py --json   # 附带原始字段名
+```
+
+确认无碍后开启：
+
+```json
+"afterclass": {
+  "enabled": true,
+  "base": "https://dekt.bupt.edu.cn",
+  "max_per_round": 5,
+  "max_records": 300,
+  "bindings": [
+    {"group": 100000003, "token_file": "afterclass/token.txt", "name": "某班"},
+    {"user":  10000001,  "token_file": "afterclass/tokens/u10000001.txt"}
+  ]
+}
+```
+
+**独立绑定**：一项 = **一个推送目标 + 它自己的 JWT**。
+
+- `group` / `user` 二选一（同时给或都不给会被跳过并告警）；
+- 省略 `token_file` 时默认 `afterclass/tokens/<group|user>-<号>.txt`；
+- 每个绑定**单独**去重、单独存活动（`data/activities/<group|user>-<号>.json`）、
+  单独计单轮上限、单独容忍 token 过期 —— 一个坏掉不影响其它；
+- 活动**只发给该绑定的目标**，不走通知的 `groups`/`users`，也**绝不 @全体成员**。
+
+为什么必须各自一份 JWT：`/api/v1/activity` 的返回是**按账号**算的
+（`college_id` / `class_id` / `grade` / `role_id` 都来自 token 对应的人）。
+同一份 token 只能代表一个同学看到的活动，硬发给别的群既不准也不合适。
+
+**真实响应字段**（2026-10 实测，`tools/dekt_probe.py --json` 可复查）：
+
+```
+id, name, location, area, activity_class, demands, attend_limit, customer,
+activity_start_time, activity_end_time, signup_start_time, signup_end_time,
+belong_to, target_id, target_role, grade, priority, picture_url, digest
+```
+
+- 时间是 **ISO8601 UTC**（`2026-10-26T07:00:00Z`），渲染时转本机时区（CST/UTC+8）；
+- `signup_*_time` 常用 `1970-01-01T00:00:00Z` 表示"没有报名窗口"，
+  这种哨兵值**不显示**（否则会写成"报名 1970-01-01 08:00"）；
+- `activity_class` 要用 `/activity/class` 的 `id → name` 翻译（"文艺活动"/"学术讲座"…）；
+- `demands` 是位掩码（`23` = 报名+签到+签退+管理）。
+
+**同步口径**（与通知刻意保持一致）：
+
+- 挂在同一轮定时同步之后（`_sync_once` → `_do_sync` 之后），
+  通知失败不影响活动，活动失败也不让整轮算失败；
+- **首轮只建基线**：第一次拉到的是存量活动，全部标成"已推送"而不发，
+  否则一开启就把历史活动全推一遍；
+- **免打扰**：窗口内只入库不推送（`activities.json` 的积压），早上补发；
+- **单轮上限** `max_per_round`：一次最多推几条，其余留到下一轮；
+- 同一活动重复拉到时**就地刷新**（时间/地点可能被改），不会重复推送；
+- 推送目标是**每个绑定自己的那一个**（不再复用通知的 `groups`/`users`）；
+- **不 @全体成员**：活动是常规招募，每来一条就 @全群会把人吵到退群。
+
+**看活动**：`list` 默认只给置顶+通知，活动要看才拿：
+
+```
+/buptnews list                    # 置顶 + 通知（默认）
+/buptnews list --scope=acts       # 只看第二课堂活动（-a 是简写）
+/buptnews list --scope=all        # 通知 + 活动
+```
+
+活动区按时间倒序、多绑定时标出归属（`[某班] 13452 10-26 15:00 …`），
+只显示最新 `list_page_size` 条并说明总数。
+
+**续期不用重启**：token 每轮同步都会重读文件，覆盖 `afterclass/token.txt` 即生效。
+JWT 的 `exp` 会被解出来，**剩余不足 3 天开始每天提醒一次**，过期后日志给出具体动作
+（`/buptnews status` 也能看到 `token 至 YYYY-MM-DD`）。
+
+> 自动化边界：**登录这一下无法自动化**。实测在真实 Chromium 页面里调登录接口仍返回
+> `420`，并加载 `/captsec` 的人机校验 iframe（商业反爬）。绕过它属于规避访问控制，
+> 所以流程是"你登录一次 → 复制 token → 其余全自动"。
+
+状态可查：`/buptnews status` 里有 `🎪 第二课堂：N 条活动 / M 条待推`。
+token 失效时日志提示 `token 已失效，跳过活动同步`，同步其余部分照常。
 
 ---
 

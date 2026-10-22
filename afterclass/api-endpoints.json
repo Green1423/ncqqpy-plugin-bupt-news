@@ -1,0 +1,81 @@
+{
+  "target": "北邮第二课堂 微信小程序 (uni-app)",
+  "source": "app-service.js -> api/*.js, utils/fly*.js, 页面调用点",
+  "baseUrl": "https://dekt.bupt.edu.cn",
+  "baseUrlOverrideStorageKey": "apibase",
+  "stagingBaseUrl": "https://dekt.241919810.xyz",
+  "apiPrefix": "/api/v1",
+  "auth": {
+    "scheme": "Bearer JWT",
+    "header": "Authorization",
+    "tokenStorageKey": "tokenv3",
+    "tokenClaims": ["sub", "exp", "banned_type", "banned_before"],
+    "userPathTemplate": "{currentUserId}",
+    "cookieStorageKeys": ["cookie._rab", "cookie._vab"],
+    "extraHeaders": ["X-UApp-Version", "X-Trace", "X-Token"],
+    "commonQuery": "_ (毫秒时间戳)", 
+    "retry": "GET 失败(非 2xx/5xx 或网络错误)最多重试 2 次，追加 _fly_retry 参数，超时 +2s"
+  },
+  "endpoints": [
+    {"id": "auth.login", "module": "api/auth.js", "name": "loginByUser", "method": "POST", "path": "/api/v1/auth/sessions", "form": ["username", "password", "code", "captcha"], "notes": "账号密码登录；code 为 wx.login 的 code；captcha 为图形验证码答案。HTTP 419/420 时响应 data.data 为验证码 token"},
+    {"id": "auth.wechat", "module": "api/auth.js", "name": "loginByWechat", "method": "POST", "path": "/api/v1/auth/wechat/sessions", "form": ["code"], "notes": "微信 code 登录；404 = openid 未绑定，跳登录页"},
+    {"id": "auth.unbind", "module": "api/auth.js", "name": "userUnbind", "method": "DELETE", "path": "/api/v1/auth/wechat", "notes": "解绑当前微信"},
+
+    {"id": "user.get", "module": "api/user.js", "name": "getUserInfo", "method": "GET", "path": "/api/v1/user/{currentUserId}", "notes": "{currentUserId} 由 JWT 的 sub 替换；401/404 被忽略"},
+    {"id": "user.update", "module": "api/user.js", "name": "updateUserInfo", "method": "PUT", "path": "/api/v1/user/{currentUserId}", "form": ["email", "phone"]},
+
+    {"id": "role.normal", "module": "api/roles.js", "name": "listNormalRoles", "method": "GET", "path": "/api/v1/role/normal"},
+    {"id": "group.college", "module": "api/roles.js", "name": "listPublicGroup", "method": "GET", "path": "/api/v1/group/org-college"},
+    {"id": "group.societies", "module": "api/roles.js", "name": "listSocieties", "method": "GET", "path": "/api/v1/group/societies"},
+
+    {"id": "activity.list", "module": "api/activity.js", "name": "listActivity", "method": "GET", "path": "/api/v1/activity", "query": {"college_id": "", "class_id": "", "grade": "", "role_id": "", "digest": "", "is_group": 0}, "notes": "返回 data 数组 + 同长度 digest 数组"},
+    {"id": "activity.get", "module": "api/activity.js", "name": "getActivity", "method": "GET", "path": "/api/v1/activity/{id}"},
+    {"id": "activity.class", "module": "api/activity.js", "name": "listActivityClass", "method": "GET", "path": "/api/v1/activity/class"},
+    {"id": "activity.join", "module": "api/activity.js", "name": "joinActivity", "method": "POST", "path": "/api/v1/participation/{act_id}", "form": ["digest", "start_t_ms", "end_t_ms", "target_id", "target_role", "grade", "customer", "demands"], "notes": "报名；start_t_ms/end_t_ms 取自活动的报名起止时间"},
+    {"id": "activity.exit", "module": "api/activity.js", "name": "exitActivity", "method": "DELETE", "path": "/api/v1/participation/{act_id}", "query": {"digest": ""}, "notes": "fly 对 GET/HEAD/DELETE/OPTION 会把 data 合并进 query"},
+    {"id": "participation.mine", "module": "api/activity.js", "name": "listParticipation", "method": "GET", "path": "/api/v1/participation/acts", "query": {"page": 1, "page_size": 40}, "notes": "page 从 1 开始"},
+    {"id": "admin.acts", "module": "api/activity.js", "name": "listParticipationAdmin", "method": "GET", "path": "/api/v1/participation/admin/act", "query": {"act_state": "", "group_as_admin": -1, "extra": "(可选对象展开)"}},
+    {"id": "admin.managers.get", "module": "api/activity.js", "name": "listActiviyManagers", "method": "GET", "path": "/api/v1/participation/admin/act/{act_id}", "query": {"identity": "", "digest": ""}},
+    {"id": "admin.managers.add", "module": "api/activity.js", "name": "addActivityManager", "method": "POST", "path": "/api/v1/participation/admin/act/{act_id}", "form": ["identity", "digest", "new_user_id", "new_identity"]},
+    {"id": "admin.managers.del", "module": "api/activity.js", "name": "deleteActivityManager", "method": "DELETE", "path": "/api/v1/participation/admin/act/{act_id}", "query": {"identity": "", "digest": "", "delete_user_id": ""}},
+    {"id": "admin.act.end", "module": "api/activity.js", "name": "endActivity", "method": "PUT", "path": "/api/v1/participation/admin/act/{act_id}", "form": ["digest", "identity"]},
+    {"id": "preference.get", "module": "api/activity.js", "name": "getUserSubscriptionSettings", "method": "GET", "path": "/api/v1/preference"},
+    {"id": "preference.update", "module": "api/activity.js", "name": "updateUserSubscriptionSettings", "method": "PUT", "path": "/api/v1/preference", "json": true},
+    {"id": "subscription.add", "module": "api/activity.js", "name": "subscribeActivity", "method": "POST", "path": "/api/v1/subscription/{activity_id}", "query": {"college_id": "", "grade": "", "role_id": ""}, "notes": "空 body，参数走 query"},
+    {"id": "subscription.del", "module": "api/activity.js", "name": "unsubscribeActivity", "method": "DELETE", "path": "/api/v1/subscription/{activity_id}", "query": {"college_id": "", "grade": "", "role_id": ""}},
+
+    {"id": "checkin.qr.user", "module": "api/checkin.js", "name": "getCheckinForUser", "method": "GET", "path": "/api/v1/checkin/qrcode/user", "headers": {"X-Trace": "<trace>"}, "notes": "返回签到码载荷对象（iat/exp/sub/act_id/opr_type/act_demand/digest/trace）"},
+    {"id": "checkin.status", "module": "api/checkin.js", "name": "getCheckinResultForUser", "method": "GET", "path": "/api/v1/checkin/status", "query": {"trace": ""}, "notes": "data.msg === 'Success' 表示已被扫"},
+    {"id": "checkin.passive", "module": "api/checkin.js", "name": "scanCheckinForUser", "method": "POST", "path": "/api/v1/checkin/passive", "form": ["data"], "headers": {"X-Token": "Base64(JSON.stringify(签到码对象))"}, "notes": "管理员扫用户二维码后调用"},
+    {"id": "checkin.ble", "module": "api/checkin.js", "name": "bleCheckinForUser", "method": "POST", "path": "/api/v1/checkin/ble/{packet}", "form": ["data"], "notes": "BLE 广播签到；packet 为广播包 hex，body 为第一步取的签到码对象"},
+    {"id": "checkin.qr.admin", "module": "api/checkin.js", "name": "getCheckinForAdmin", "method": "GET", "path": "/api/v1/checkin/qrcode/admin/{act_id}/{opr_type}", "notes": "管理员动态签到码，opr_type 0=签到 1=签退"},
+    {"id": "checkin.dynamic", "module": "api/checkin.js", "name": "listCheckinUsersV2", "method": "GET", "path": "/api/v1/checkin/dynamic_list", "query": {"act_id": "", "opr_type": "", "limit": 99999999, "last_id": 0}},
+
+    {"id": "news.preview", "module": "api/news-new.js", "name": "getNewsListAPI", "method": "GET", "path": "/api/v1/news/preview"},
+    {"id": "news.tree", "module": "api/news-new.js", "name": "getNewsTreeIDAPI", "method": "GET", "path": "/api/v1/news/tree"},
+    {"id": "news.search", "module": "api/news-new.js", "name": "search_", "method": "POST", "path": "/api/v1/news/search", "json": {"tree_id": "", "time": {"from": "", "to": ""}, "query": "", "size": 10, "offset": 0, "type": "all|news|notification|announcement"}, "notes": "响应 data 可能是字符串，需二次 JSON.parse；结果在 data.data.hits / data.data.total"},
+
+    {"id": "store.products", "module": "api/store.js", "name": "getProductList", "method": "GET", "path": "/api/v1/store/product", "query": {"status": 0, "detail": 0, "target_id": -1}},
+    {"id": "store.product", "module": "api/store.js", "name": "getDetailedProduct", "method": "GET", "path": "/api/v1/store/product/{id}"},
+    {"id": "store.order", "module": "api/store.js", "name": "createOrder", "method": "POST", "path": "/api/v1/store/order", "json": {"product_id": "", "count": 1, "redeem_type": ""}},
+    {"id": "store.orders", "module": "api/store.js", "name": "getOrderList", "method": "GET", "path": "/api/v1/store/orderRecords", "query": {"page": 1, "limit": 0, "filter": 0}},
+    {"id": "store.scores.history", "module": "api/store.js", "name": "getScoreHistory", "method": "GET", "path": "/api/v1/store/scoreRecords", "query": {"page": 1, "limit": 0}},
+    {"id": "store.score", "module": "api/store.js", "name": "getUserScore", "method": "GET", "path": "/api/v1/store/score", "notes": "data = {college_score, school_score}"},
+
+    {"id": "transcript.jobs", "module": "api/transcript.js", "name": "getGenerateJobs", "method": "GET", "path": "/api/v1/transcript/pdf/generate-jobs", "headers": {"Content-Type": "application/json"}, "notes": "data.result = {waiting[], active[], completed[], failed[]}"},
+    {"id": "transcript.generate", "module": "api/transcript.js", "name": "transcriptSend", "method": "POST", "path": "/api/v1/transcript/pdf/generate", "json": {"email": "", "semesters": ["2024-2025-1"], "types": [1, 2]}},
+
+    {"id": "misc.config", "module": "bus.js", "name": "getConfig", "method": "GET", "path": "/config/index.json", "notes": "远程功能开关，相对 baseURL"},
+    {"id": "misc.umami", "module": "common/vendor.js (umami)", "name": "track", "method": "POST", "path": "/api/v1/event/send?_=<deviceId36>", "json": {"type": "event", "payload": {}}, "headers": {"X-UApp-Version": "", "x-umami-cache": ""}, "notes": "访问统计（umami 自托管）"},
+    {"id": "misc.image", "module": "api/attachment.js", "name": "getAttachmentLink", "method": "GET", "path": "/api/v1/image/{imageId}", "notes": "仅拼接 URL 用于 <image>，不带鉴权头"}
+  ],
+  "h5Bridge": {
+    "webview": "{base}{path}#{JSON: env,theme,token,prepare,_}",
+    "tokenLand": "/auth/token-land?t=<Date.now()/60000 转 36 进制>",
+    "captcha": "/mp-captcha.html#<captchaToken>",
+    "news": "/news/{id}",
+    "qrEntry": "/qr?activity={id} | /qr?url={path} | /qr?checkin_type=code|ble",
+    "managerCheckin": "/activity/{act_id}/checkin/scan?digest=&identity=&name=&forceOpenCamera=true",
+    "qrDomain": "dekt.bupt.edu.cn/qr"
+  }
+}

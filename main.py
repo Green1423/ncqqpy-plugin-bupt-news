@@ -58,13 +58,14 @@
                         指数递增），max_attempts=累计失败多少次后停止自动重试（默认 5，命令可强制重试）
     chunk               {max_chars, max_images} 长消息分段配额，默认 {1200, 4}；
                         0 表示该维度不限（文字优先在换行处断开，图片/媒体段不拆）
-    binding             {groups, users} 私聊（含群小窗）可用范围白名单：
-                        groups=允许在**群聊临时会话（小窗）**里用命令的来源群，
-                        留空则沿用框架的 `bound_groups`（谁被监听就允许谁的小窗）；
-                        users=允许直接私聊用命令的 QQ 号。
-                        两者都空 = 非超级用户私聊一律不服务（含 get）。
-                        群聊内不受影响；超级用户豁免（防止把自己锁在外面）。
-                        用 `/buptnews bind user|group <号>` 增删（见下）
+    targets             {"groups": {"<群号>": {"message":, "event":, "token_file":}},
+                         "users":  {"<QQ号>": {...}}}
+                        绑定表：一项 = 一个群/用户 + 两个开关。
+                        message=是否推通知；event=是否推第二课堂活动（需 token）。
+                        它同时就是**准入名单**：在表里才允许私聊/小窗用命令
+                        （群聊内不受影响；超级用户豁免，防止把自己锁在外面）。
+                        用 `/buptnews add|set|del` 维护；旧配置里的
+                        `groups`/`users`/`binding`/`afterclass.bindings` 仍兼容。
     max_push_per_round  单轮最多推送条数，默认 8
     first_run_backfill  首次运行回填条数，默认 0（只建基线不推送）
     username            门户账号（学号/工号）
@@ -82,30 +83,34 @@
     /buptnews status          查看状态
     /buptnews list [页码]     分页列出通知编号（最新在前）
     /buptnews get <编号>      查看该通知全文（图文按原排版；过长自动分多条）与原文链接
-    /buptnews targets         查看推送目标
+    /buptnews targets         查看绑定（准入 + 通知/活动开关）
     /buptnews sync [页数] [preview]      立即同步
-    /buptnews add [group|user] [号]      添加目标（省略群号则用当前群）
-    /buptnews del [group|user] [号]      移除目标
+    /buptnews add group|user <号> [message=on|off] [event=on|off]
+                              绑定目标（准入 + 推什么；省略群号则用当前群）
+    /buptnews set group|user <号> [message=] [event=]
+                              只改开关
+    /buptnews del group|user <号>        移除绑定（连带数据目录里的 token）
+    /buptnews dektoken user <JWT>        设置**自己**的第二课堂 token
+    /buptnews dektoken group <群号> <JWT>  群主/管理员设置该群的 token
     /buptnews on | off        开关推送
     /buptnews interval [时长] 设置间隔，如 10m / 600
     /buptnews search <关键词> [每页] [页码] [日期]   本地库 + 信息门户（门户结果给 E 编号）
     /buptnews pin|unpin [编号|E编号|P编号 ...]      置顶（独立编号 P1/P2…，存 state.json）
     /buptnews images [stats|backfill|download|retry] [数量]
                               图片缓存：统计 / 补齐历史图片 / 只下图片 / 重试失败的下载
-    /buptnews bind [user|group] <号> [list|add|del]
-                              私聊可用范围白名单：谁能私聊用本插件
-                              （省略号数 = 只看当前白名单）
 
 权限：查询/同步需 admin（私聊中非超级用户不满足，等同仅超级用户）；
-      增删目标与开关需 superuser。
+      绑定与开关需 superuser；`dektoken` 例外 —— 用户只能设自己的、
+      群里只有群主/管理员能设，都在命令内部逐条判定。
 
-私聊可用范围（`binding`）
+私聊可用范围（`targets`）
 ------------------------
 私聊（含群小窗）里只有这些调用者能用命令：
 
-* **超级用户** —— 始终可用（防止白名单把自己锁在外面，也是唯一能改白名单的人）；
-* 来源群在 `binding.groups`（留空则取框架 `bound_groups`）里的**群聊临时会话**；
-* QQ 号在 `binding.users` 里的用户（**直接私聊**）。
+* **超级用户** —— 始终可用（防止绑定配错把自己锁在外面）；
+* 来源群在 `targets.groups`（没配群绑定时取框架 `bound_groups`）里的**群聊临时会话**；
+* QQ 号在 `targets.users` 里的用户（**直接私聊**）。
+
 
 群聊内不受此限制（群消息本来就已被框架的 `bound_groups` 过滤）；判定与
 `/help` 的可见性同口径 —— 用不了的地址在帮助里也看不到本命名空间。
@@ -247,7 +252,7 @@ from .table_image import TableImageStore, is_renderable, parse_table
 from .portal import Notice, PortalAuthError, PortalClient, PortalError
 from .schemas import (
     AddTargetSchema,
-    BindSchema,
+    DektokenSchema,
     DelTargetSchema,
     GetSchema,
     ImagesSchema,
@@ -255,9 +260,13 @@ from .schemas import (
     ListSchema,
     PinSchema,
     SearchSchema,
+    SetTargetSchema,
     SyncSchema,
     UnpinSchema,
 )
+from .activity_store import ActivityStore
+from .dekt import (DEKT_BASE, DektAuthError, DektClient, clean_token,
+                   decode_jwt, format_activity, normalize_activity)
 from .store import (PIN_LIMIT_REACHED, StateStore, decode_external,
                    external_code, external_url, is_external_code)
 from .summarize import Summarizer, fallback_summary
@@ -266,6 +275,21 @@ from .weather import WeatherClient, weather_line
 SYNC_TIMER = "bupt_news.sync"
 # AI 摘要的全部默认值（单一来源）：`on_load` 逐键写入 config，
 # `_summary_cfg` 也用它做兜底 —— 两处各写一份必然会漂移。
+# 「第二课堂」活动同步默认值。⚠️ 与 summarize 一样必须**逐键合并**：
+# 用户配置里已有 `afterclass` 时 `setdefault` 整段不生效，缺的键会静默丢。
+AFTERCLASS_DEFAULTS = {
+    "enabled": False,
+    "base": "https://dekt.bupt.edu.cn",
+    "max_per_round": 5,        # 单个绑定单轮最多推几条（避免一次刷屏）
+    "max_records": 300,        # 每个绑定本地保留多少条活动记录
+    # **独立绑定**：每个推送目标（一个群或一个用户）**各自一份 JWT**。
+    # 第二课堂的活动列表是按账号（学院/年级/角色）算的，不同账号看到的活动不同，
+    # 所以不能共用一份 token。每项形如：
+    #   {"group": 123456, "token_file": "afterclass/tokens/g123456.txt", "name": "xx班"}
+    #   {"user": 654321,  "token_file": "afterclass/tokens/u654321.txt"}
+    "bindings": [],
+}
+
 SUMMARY_DEFAULTS = {
     "enabled": True,
     "base_url": "https://api.deepseek.com",
@@ -318,6 +342,10 @@ class BuptNewsPlugin(PluginBase):
     version = "1.0.0"
     description = "每 10 分钟同步北邮校内通知并推送到指定 QQ 群/用户"
     author = "bupt-news"
+
+    # 未启用/未初始化时也必须存在：同步路径会无条件读它们（只在 on_enable 里赋值
+    # 的话，跳过 on_enable 的用法会在同步环节抛 AttributeError）。
+    _act_bindings: list = []
 
     # ------------------------------------------------------------------ 生命周期
 
@@ -394,6 +422,8 @@ class BuptNewsPlugin(PluginBase):
                         "timeout": 20, "umbrella_pop": 50},
             # ---- AI 摘要（默认值的单一来源见 SUMMARY_DEFAULTS）----
             "summarize": dict(SUMMARY_DEFAULTS),
+            # ---- 第二课堂活动（默认值的单一来源见 AFTERCLASS_DEFAULTS）----
+            "afterclass": dict(AFTERCLASS_DEFAULTS),
             # ---- 正文图片 ----
             "images": {"enabled": True, "max_bytes": 10 * 1024 * 1024,
                        "prefetch": True, "prefetch_max": 30,
@@ -519,6 +549,10 @@ class BuptNewsPlugin(PluginBase):
                 "[bupt_news] 未找到 chromium，正文表格将无法渲染成图片"
                 "（表格内容仍以文本形式出现）")
 
+        ac = self.config.get("afterclass") or {}
+        if ac.get("enabled"):
+            self._build_activity_bindings(ac, warn=True)
+
         self._register_commands()
         self._schedule_sync()
 
@@ -558,6 +592,8 @@ class BuptNewsPlugin(PluginBase):
         self._images = None
         self._tables = None
         self._img_failures = None
+        self._close_activity_bindings()
+        self._act_bindings = []
         self._store.save()
         self.logger.info("[bupt_news] 已停用")
 
@@ -603,39 +639,129 @@ class BuptNewsPlugin(PluginBase):
     # 判定见 `check_access()`；强制点只有一个：`_register_commands()` 给每条命令
     # 包的守卫（`/help` 的可见性过滤器复用同一判定，保证「看得到」= 「用得了」）。
 
-    def _binding(self) -> dict:
-        """`binding` 配置段（写坏成非字典时按空处理，不让一个笔误炸掉命令）。"""
-        value = self.config.get("binding")
-        return value if isinstance(value, dict) else {}
+    # -------------------------------------------------- 目标绑定（targets）
+    #
+    # 一个绑定 = 一个群/用户 + 两个开关：
+    #   message —— 是否推通知；event —— 是否推第二课堂活动（要配 token）。
+    # 它同时就是**准入名单**：在名单里才允许私聊/小窗用命令（见 check_access）。
+    # 旧的 `groups`/`users`（推送目标）、`binding`（私聊白名单）、
+    # `afterclass.bindings`（活动绑定）三份配置读侧仍兼容，见 `_targets()`。
+
+    _TARGET_KINDS = (("group", "groups"), ("user", "users"))
+
+    def _targets(self) -> dict:
+        """规范化后的绑定表：`{"groups": {int: spec}, "users": {int: spec}}`。
+
+        新配置优先；没有 `targets` 时从三份旧配置**合成**（推送目标给
+        `message=True`、白名单给 `message=False`、活动绑定给 `event=True`）。
+        这样旧配置文件在升级后立刻可用，不需要手工迁移。
+        """
+        out: dict = {"groups": {}, "users": {}}
+        raw = self.config.get("targets")
+        if isinstance(raw, dict) and ("groups" in raw or "users" in raw):
+            for key in ("groups", "users"):
+                block = raw.get(key) or {}
+                items = block.items() if isinstance(block, dict) else [
+                    (v, {}) for v in (block if isinstance(block, list) else [])]
+                for k, v in items:
+                    try:
+                        tid = int(k)
+                    except (TypeError, ValueError):
+                        continue
+                    if tid <= 0:            # QQ 号/群号必须为正
+                        continue
+                    spec = v if isinstance(v, dict) else {}
+                    out[key][tid] = {
+                        "message": bool(spec.get("message", True)),
+                        "event": bool(spec.get("event", False)),
+                        "token_file": str(spec.get("token_file") or ""),
+                    }
+            return out
+
+        # ---- 旧配置兜底 ----
+        for key in ("groups", "users"):
+            for tid in self._int_list(key):          # 推送目标 → 推通知
+                out[key][tid] = {"message": True, "event": False, "token_file": ""}
+        legacy = self.config.get("binding")
+        if isinstance(legacy, dict):
+            for key in ("groups", "users"):
+                for tid in self._to_ids(legacy.get(key)):   # 白名单 → 只准入
+                    out[key].setdefault(
+                        tid, {"message": False, "event": False, "token_file": ""})
+        ac = self.config.get("afterclass") or {}
+        for item in ac.get("bindings") or []:
+            if not isinstance(item, dict):
+                continue
+            group, user = item.get("group"), item.get("user")
+            key, tid = (("groups", group) if group else
+                        ("users", user) if user else ("", None))
+            if not key:
+                continue
+            try:
+                tid = int(tid)
+            except (TypeError, ValueError):
+                continue
+            spec = out[key].setdefault(
+                tid, {"message": False, "event": False, "token_file": ""})
+            spec["event"] = True
+            if item.get("token_file"):
+                spec["token_file"] = str(item["token_file"])
+        return out
+
+    def _save_targets(self, data: dict) -> None:
+        """把绑定表写回配置（键统一成字符串，JSON 里才稳定）。"""
+        payload = {"groups": {}, "users": {}}
+        for key in ("groups", "users"):
+            for tid, spec in (data.get(key) or {}).items():
+                entry = {"message": bool(spec.get("message", True)),
+                         "event": bool(spec.get("event", False))}
+                if spec.get("token_file"):
+                    entry["token_file"] = str(spec["token_file"])
+                payload[key][str(int(tid))] = entry
+        self.config.set("targets", payload)
+
+    def _target(self, kind: str, target: int) -> dict | None:
+        return (self._targets().get("groups" if kind == "group" else "users")
+                or {}).get(int(target))
+
+    def _message_targets(self) -> tuple[list[int], list[int]]:
+        """推通知的目标（`message=True`）。"""
+        data = self._targets()
+        return (sorted(t for t, s in data["groups"].items() if s["message"]),
+                sorted(t for t, s in data["users"].items() if s["message"]))
+
+    def _event_targets(self) -> list[tuple[str, int, dict]]:
+        """启用活动推送的绑定：`[(kind, target, spec)]`。"""
+        data = self._targets()
+        out = []
+        for kind, key in self._TARGET_KINDS:
+            for tid, spec in sorted(data[key].items()):
+                if spec["event"]:
+                    out.append((kind, tid, spec))
+        return out
 
     def _bound_users(self) -> set[int]:
-        """允许**直接私聊**使用命令的 QQ 号。
-
-        ⚠️ 与推送目标 `users` 是两件事：把人加进推送目标只是给他发通知，
-        不等于允许他私聊调命令；反之亦然。两个清单各自显式维护。
-        """
-        return self._to_ids(self._binding().get("users"))
+        """允许**直接私聊**用命令的 QQ 号 = 所有用户绑定。"""
+        return set(self._targets()["users"])
 
     def _bound_groups(self) -> set[int]:
-        """允许**群聊临时会话（小窗）**使用命令的来源群。
+        """允许**群聊临时会话（小窗）**用命令的来源群 = 所有群绑定。
 
-        留空则沿用框架的 `bound_groups`（`/groups` 看到的那份）—— 「机器人监听
-        哪些群」与「哪些群的小窗能调命令」默认是同一批群，没必要维护两份；
-        想收紧就显式写 `binding.groups`。注意框架的 `bound_groups` 为空 = 监听
-        **所有**群，语义与白名单相反，所以那份只在非空时才拿来兜底。
+        没配任何群绑定时沿用框架的 `bound_groups`（`/groups` 那份）—— 「监听
+        哪些群」与「哪些群的小窗能调命令」默认同一批；注意框架那份为空表示
+        监听**所有**群，语义与白名单相反，所以只在非空时兜底。
         """
-        own = self._to_ids(self._binding().get("groups"))
+        own = set(self._targets()["groups"])
         if own:
             return own
         try:
-            inherited = self._to_ids(self.bound_groups)
+            return self._to_ids(self.bound_groups)
         except Exception:  # noqa: BLE001 - 拿不到框架绑定就按「没配」处理
-            inherited = set()
-        return inherited
+            return set()
 
     def _private_scope_hint(self) -> str:
-        return ("私聊可用范围 = 绑定群的群聊临时会话（小窗）+ 指定用户，"
-                "见 config.json → plugins.bupt_news.binding")
+        return ("私聊可用范围 = 绑定群的群聊临时会话（小窗）+ 绑定用户，"
+                "见 config.json → plugins.bupt_news.targets")
 
     def check_access(self, event) -> bool:
         """这条消息的调用者是否在服务范围内（**与权限等级无关**）。
@@ -790,7 +916,7 @@ class BuptNewsPlugin(PluginBase):
 
         self.logger.info(
             "[bupt_news] 已启用：每 %ds 同步一次；推送目标 %d 群 / %d 用户",
-            interval, len(self._int_list("groups")), len(self._int_list("users")),
+            interval, len(self._message_targets()[0]), len(self._message_targets()[1]),
         )
 
     def _reschedule(self) -> None:
@@ -812,8 +938,14 @@ class BuptNewsPlugin(PluginBase):
             return None
         self._syncing = True
         try:
-            return await self._do_sync(reason, pages, force_push, preview_user,
-                                       preview_group)
+            result = await self._do_sync(reason, pages, force_push, preview_user,
+                                        preview_group)
+            # 第二课堂与通知是两条独立链路：通知失败不该拖累活动，
+            # 活动失败也不该让整轮同步算失败（各自内部吞异常并记日志）。
+            # preview 是"只发给自己看通知"，不该顺带把活动推给群。
+            if preview_user is None:
+                await self._sync_activities()
+            return result
         except PortalAuthError as e:
             self.logger.error("[bupt_news] 门户认证失败：%s", e)
             return None
@@ -985,6 +1117,403 @@ class BuptNewsPlugin(PluginBase):
         # 结果早报被 60 条学生判定的网络等待拖住、再被进程重启打断，当天早报没发出去。
         await self._backfill_ai_results()
         return (len(pending), sent, failed)
+
+    def _warn_token_expiry(self) -> None:
+        """按绑定检查 token 过期，**每个绑定每天最多提醒一次**。
+
+        手动续期是这套流程里唯一必须人做的事，所以不能让它静默失效：
+        提前 3 天开始提醒，过期后说明具体动作（覆盖对应绑定自己的 token 文件即可）。
+        """
+        today = self._today()
+        warned = getattr(self, "_token_warn_dates", None)
+        if not isinstance(warned, dict):
+            warned = self._token_warn_dates = {}
+        for binding in getattr(self, "_act_bindings", []) or []:
+            client = binding.get("client")
+            get_expiry = getattr(client, "expiry", None)
+            if not callable(get_expiry):
+                continue
+            expiry = get_expiry()
+            if expiry is None:
+                continue
+            left = (expiry - datetime.now()).total_seconds()
+            if left > 3 * 86400:
+                continue
+            key = f"{binding['kind']}-{binding['target']}"
+            if warned.get(key) == today:
+                continue
+            warned[key] = today
+            if left <= 0:
+                self.logger.error(
+                    "[bupt_news] 第二课堂绑定「%s」的 token 已于 %s 过期，暂停拉取。"
+                    "重新登录后把新 JWT 写入 %s 即恢复（无需重启）",
+                    binding["name"], expiry.strftime("%Y-%m-%d %H:%M"),
+                    binding["token_file"])
+            else:
+                self.logger.warning(
+                    "[bupt_news] 第二课堂绑定「%s」的 token 将在 %s 过期（剩 %.1f 天），"
+                    "建议提前登录并把新 JWT 写入 %s",
+                    binding["name"], expiry.strftime("%Y-%m-%d %H:%M"),
+                    max(0.0, left / 86400), binding["token_file"])
+
+    # -------------------------------------------------- 第二课堂（独立绑定）
+
+    def _binding_store_path(self, kind: str, target: int) -> str:
+        """每个绑定一份活动文件：`data/activities/<group|user>-<号>.json`。
+
+        分开存的好处：不同账号看到的活动集合本来就不一样，
+        混在一个文件里既没法按绑定去重，也看不出某条活动是从哪个账号来的。
+        """
+        return os.path.join(self._data_dir, "activities", f"{kind}-{target}.json")
+
+    def _build_activity_bindings(self, ac: dict, *, warn: bool = False) -> list:
+        """从配置构建绑定列表：一项 = 一个目标 + 它自己的 JWT。
+
+        配置写错（既没 group 也没 user、token 文件不存在等）只跳过该项并告警，
+        不能让一个配错的绑定把整个插件带崩。
+        """
+        self._close_activity_bindings()
+        out: list[dict] = []
+        base = ac.get("base") or DEKT_BASE
+        max_records = int(ac.get("max_records", 300) or 300)
+        for kind, target, spec in self._event_targets():
+            token_file = self._token_path(kind, target, spec)
+            name = f"{'群' if kind == 'group' else '用户'}{target}"
+            client = DektClient(base=base, logger=self.logger,
+                               token_file=token_file)
+            store = ActivityStore(self._binding_store_path(kind, target),
+                                  max_records=max_records, logger=self.logger)
+            out.append({"name": name, "kind": kind, "target": target,
+                        "token_file": token_file, "client": client,
+                        "store": store})
+            if warn and not client.available:
+                self.logger.warning(
+                    "[bupt_news] 第二课堂绑定「%s」缺少可用 token（%s），该项不拉活动",
+                    name, token_file)
+        if warn and not out:
+            self.logger.warning(
+                "[bupt_news] 第二课堂已开启但没有启用活动推送的绑定；"
+                "用 /buptnews add group|user <号> event=on 绑定，"
+                "再用 /buptnews dektoken user|group <JWT> 设置 token")
+        self._act_bindings = out
+        return out
+
+    _SWITCH_TRUE = {"on", "true", "1", "yes", "y", "是", "开"}
+    _SWITCH_FALSE = {"off", "false", "0", "no", "n", "否", "关"}
+
+    @classmethod
+    def _parse_switches(cls, tokens, allowed=("message", "event")
+                        ) -> tuple[dict, list[str]]:
+        """解析 `message=on event=off` 这类开关，返回 `({键: bool}, [错误])`。
+
+        同时接受 `key=value` / `key:value` / `--key=value`：框架只把 `--key=value`
+        交给 kwargs，其余会落到位置参数里，所以这里统一从原文 token 解析，
+        用户怎么写都不会莫名其妙报"必须为布尔值"。
+        """
+        out: dict[str, bool] = {}
+        errors: list[str] = []
+        for raw in tokens or []:
+            text = str(raw).strip().lstrip("-")
+            if "=" in text:
+                key, value = text.split("=", 1)
+            elif ":" in text:
+                key, value = text.split(":", 1)
+            else:
+                errors.append(f"`{raw}` 不是 key=value 形式"
+                              "（应写成 event=on / message=off）")
+                continue
+            key = key.strip().lower()
+            value = value.strip().lower()
+            if key not in allowed:
+                errors.append(f"未知开关 `{key}`（可用：{'、'.join(allowed)}）")
+                continue
+            if value in cls._SWITCH_TRUE:
+                out[key] = True
+            elif value in cls._SWITCH_FALSE:
+                out[key] = False
+            else:
+                errors.append(f"`{key}` 的值 `{value}` 认不出"
+                              "（用 on/off、是/否、1/0）")
+        return out, errors
+
+    def _token_path(self, kind: str, target: int, spec: dict | None = None) -> str:
+        """某个绑定的 token 文件路径。
+
+        显式配置优先（旧配置里的相对路径按插件目录解析）；
+        否则默认放**数据目录**下的 `dekt-tokens/<kind>-<号>.txt` ——
+        口令属于运行时数据，不该写进源码目录。
+        """
+        configured = str((spec or {}).get("token_file") or "").strip()
+        if configured:
+            if os.path.isabs(configured):
+                return configured
+            return os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), configured)
+        return os.path.join(self._data_dir, "dekt-tokens",
+                            f"{kind}-{int(target)}.txt")
+
+    def _write_token(self, kind: str, target: int, token: str) -> str:
+        """把 JWT 写进该绑定的 token 文件，返回路径。
+
+        权限收紧到 0600：这是登录凭据，同机其它用户不该读得到。
+        """
+        path = self._token_path(kind, target, self._target(kind, target))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(clean_token(token))
+        os.replace(tmp, path)
+        return path
+
+    def _close_activity_bindings(self) -> None:
+        """关掉各绑定持有的 HTTP 会话（停用/重建时调用）。"""
+        for b in getattr(self, "_act_bindings", []) or []:
+            client = b.get("client")
+            closer = getattr(client, "close", None)
+            if not callable(closer):
+                continue
+            try:
+                task = closer()
+                if asyncio.iscoroutine(task):
+                    asyncio.ensure_future(task)
+            except Exception:  # noqa: BLE001 - 关闭失败不值得再抛
+                pass
+
+    def _activity_binding(self, kind: str, target: int) -> dict | None:
+        for b in getattr(self, "_act_bindings", []) or []:
+            if b["kind"] == kind and b["target"] == int(target):
+                return b
+        return None
+
+    def _refresh_activity_bindings(self) -> list:
+        """配置一变就重建活动绑定，**立即生效**（不用重启/等下一轮）。
+
+        `add`/`set`/`del`/`dektoken` 改完配置都会调它，所以"刚绑定完就能拉"，
+        不会出现"改完了但要等重启"的割裂感。
+        """
+        ac = self.config.get("afterclass") or {}
+        if not ac.get("enabled"):
+            self._close_activity_bindings()
+            self._act_bindings = []
+            return []
+        try:
+            return self._build_activity_bindings(ac)
+        except Exception as e:  # noqa: BLE001 - 重建失败保留旧绑定更安全
+            self.logger.error("[bupt_news] 重建活动绑定失败：%s", e)
+            return getattr(self, "_act_bindings", []) or []
+
+    async def _group_role_of(self, group_id: int, user_id: int) -> str:
+        """查某人在群里的身份（`owner` / `admin` / `member`；查不到返回空串）。
+
+        `get_group_member_info` 依赖机器人**在那个群里**；机器人不在群时接口会失败，
+        这里按"查不到"处理（调用方据此拒绝），而不是当成有权限。
+        """
+        getter = getattr(self.api, "get_group_member_info", None)
+        if not callable(getter):
+            return ""
+        try:
+            info = await getter(str(group_id), str(user_id))
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning("[bupt_news] 查群 %s 成员 %s 身份失败：%s",
+                                group_id, user_id, e)
+            return ""
+        role = getattr(info, "role", None)
+        if role is None and isinstance(info, dict):
+            role = info.get("role")
+        # GroupMemberRole 是 str 枚举，直接 str() 会得到 "GroupMemberRole.OWNER"
+        return str(getattr(role, "value", role) or "")
+
+    async def _send_to_binding(self, binding: dict, chain: MessageChain) -> int:
+        """把消息发给该绑定的**唯一目标**，返回成功条数（分片按 chunk 配置）。
+
+        刻意不复用 `_push_chain`：那个是通知的"群发 + @全体成员"逻辑，
+        活动只发给一个目标、且绝不 @all。
+        """
+        if not self.config.get("enabled", True):
+            self.logger.info("[bupt_news] 推送开关已关闭，跳过活动发送")
+            return 0
+        split = self._split_chain(chain)
+        chunks = split if isinstance(split, list) else [split]
+        kind, target = binding["kind"], binding["target"]
+        sent = 0
+        for ch in chunks:
+            if kind == "group":
+                await self.api.send_group_msg(str(target), ch)
+            else:
+                await self.api.send_private_msg(str(target), ch)
+            sent += 1
+        self.logger.info("[bupt_news] 已推送活动 → %s %s", kind, target)
+        return sent
+
+    def _activity_list_lines(self, size: int) -> list[str]:
+        """`list --scope=acts|all` 的活动区：每个绑定的最新活动按时间倒序合并。
+
+        与通知的编号分页无关（活动是外部 id），只显示最新 `size` 条并说明截断。
+        """
+        bindings = getattr(self, "_act_bindings", []) or []
+        if not bindings:
+            return ["🎪 第二课堂：未配置绑定（afterclass.bindings）"]
+        rows: list[tuple[float, str, dict]] = []
+        for b in bindings:
+            for rec in b["store"].all_records():
+                rows.append((float(rec.get("ts") or 0), b["name"], rec))
+        if not rows:
+            return ["🎪 第二课堂：暂无活动记录（等下次同步）"]
+        rows.sort(key=lambda r: r[0], reverse=True)
+        total = len(rows)
+        shown = rows[:size]
+        multi = len(bindings) > 1
+        head = f"🎪 第二课堂（{len(bindings)} 个绑定 · 共 {total} 条"
+        head += f"，仅显示最新 {len(shown)} 条）" if total > len(shown) else "）"
+        lines = [head]
+        for _ts, name, rec in shown:
+            prefix = f"[{name}] " if multi else ""
+            date = str(rec.get("start") or rec.get("apply_end") or "")[5:16]
+            title = str(rec.get("title") or "（无标题）")[:26]
+            lines.append(f"{prefix}{rec.get('id')} {date} {title}".rstrip())
+        return lines
+
+    def _afterclass_status_line(self) -> str:
+        """状态里的「第二课堂」一行：绑定数、活动总数、待推数、最早到期时间。"""
+        ac = self.config.get("afterclass") or {}
+        if not ac.get("enabled"):
+            return "🎪 第二课堂：未开启"
+        bindings = getattr(self, "_act_bindings", []) or []
+        if not bindings:
+            return "🎪 第二课堂：⚠️ 已开启但没有可用绑定（afterclass.bindings）"
+        records = sum(b["store"].record_count for b in bindings)
+        pending = sum(len(b["store"].backlog()) for b in bindings)
+        missing = [b["name"] for b in bindings
+                   if not getattr(b["client"], "available", False)]
+        parts = [f"{len(bindings)} 个绑定", f"{records} 条活动",
+                 f"{pending} 条待推"]
+        if missing:
+            parts.append(f"⚠️ {len(missing)} 个缺 token")
+        expiries = [b["client"].expiry() for b in bindings
+                    if callable(getattr(b["client"], "expiry", None))]
+        expiries = [e for e in expiries if e is not None]
+        if expiries:
+            parts.append(f"token 最近至 {min(expiries):%Y-%m-%d}")
+        return "🎪 第二课堂：" + " / ".join(parts)
+
+    async def _sync_activities(self) -> tuple[int, int]:
+        """按绑定逐个拉活动并推送，返回 `(新活动总数, 成功发送的目标数)`。
+
+        每个绑定是**独立的账号 + 独立的目标**：一个绑定失败（token 过期、网络抖动）
+        只跳过它自己，不影响其它绑定，也不影响通知同步。
+        """
+        bindings = getattr(self, "_act_bindings", []) or []
+        if not bindings:
+            return (0, 0)
+        self._warn_token_expiry()
+        fresh_total = sent_total = 0
+        for binding in bindings:
+            try:
+                fresh, sent = await self._sync_one_binding(binding)
+            except Exception as e:  # noqa: BLE001 - 单绑定失败不能拖垮全局
+                self.logger.warning("[bupt_news] 第二课堂绑定「%s」同步失败：%s",
+                                    binding.get("name"), e)
+                continue
+            fresh_total += fresh
+            sent_total += sent
+        return (fresh_total, sent_total)
+
+    async def _sync_one_binding(self, binding: dict) -> tuple[int, int]:
+        """同步**一个**绑定：拉该账号可见的活动，推给它自己的目标。"""
+        client = binding["client"]
+        store = binding["store"]
+        name = binding["name"]
+
+        # 续期只看文件有没有更新（覆盖该绑定的 token 文件即可，无需重启）
+        reload_token = getattr(client, "reload_token", None)
+        if callable(reload_token):
+            try:
+                if reload_token():
+                    self.logger.info(
+                        "[bupt_news] 绑定「%s」的 token 已更新（%s）", name,
+                        "可用" if client.available else "但内容不是有效 JWT")
+            except Exception as e:  # noqa: BLE001
+                self.logger.warning("[bupt_news] 绑定「%s」重读 token 失败：%s",
+                                    name, e)
+        if not getattr(client, "available", False):
+            return (0, 0)
+
+        try:
+            me = await client.me()
+        except DektAuthError:
+            self.logger.warning(
+                "[bupt_news] 绑定「%s」的 token 已失效，跳过（新 JWT 写入 %s 即恢复）",
+                name, binding["token_file"])
+            return (0, 0)
+
+        user = me.get("user") or {}
+        try:
+            raw = await client.activities(
+                digest=me.get("digest") or "",
+                college_id=user.get("college_id") or 0,
+                class_id=user.get("class_id") or 0,
+                grade=user.get("grade") or 0,
+                role_id=user.get("role_id") or 0,
+            )
+        except DektAuthError:
+            self.logger.warning("[bupt_news] 绑定「%s」的 token 失效，跳过", name)
+            return (0, 0)
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning("[bupt_news] 绑定「%s」拉活动失败：%s", name, e)
+            return (0, 0)
+
+        classes: dict[str, str] = {}
+        try:
+            classes = {str(c.get("id")): str(c.get("name") or "")
+                       for c in await client.activity_classes()}
+        except Exception as e:  # noqa: BLE001 - 分类只影响展示
+            self.logger.warning("[bupt_news] 绑定「%s」拉分类失败（不影响同步）：%s",
+                                name, e)
+
+        norms = [normalize_activity(a, classes) for a in raw]
+        first_run = store.record_count == 0
+        fresh = store.upsert(norms)
+        if fresh:
+            self.logger.info("[bupt_news] 绑定「%s」拉到 %d 条活动，新增 %d 条",
+                             name, len(norms), len(fresh))
+        # 首轮只建基线：否则第一次接入就把**存量活动**全推一遍
+        if first_run:
+            store.mark_pushed([r.get("id") for r in fresh])
+            self.logger.info("[bupt_news] 绑定「%s」首轮建立基线，不推送（%d 条）",
+                             name, len(fresh))
+            return (len(fresh), 0)
+
+        backlog = store.backlog()
+        if not backlog:
+            return (len(fresh), 0)
+        if self._in_quiet_hours():
+            self.logger.info(
+                "[bupt_news] 处于免打扰时段，绑定「%s」有 %d 条活动已入库待补发",
+                name, len(backlog))
+            return (len(fresh), 0)
+
+        cap = max(1, int((self.config.get("afterclass") or {})
+                         .get("max_per_round", 5) or 5))
+        batch = backlog[-cap:] if len(backlog) > cap else backlog
+        if len(backlog) > cap:
+            self.logger.info(
+                "[bupt_news] 绑定「%s」待推 %d 条超出单轮上限 %d，仅推送最新 %d 条",
+                name, len(backlog), cap, cap)
+
+        head = f"🎪 第二课堂新活动（{len(batch)}）"
+        body = "\n\n".join(format_activity(r) for r in batch)
+        try:
+            sent = await self._send_to_binding(
+                binding, MessageChain().text(f"{head}\n\n{body}"))
+        except Exception as e:  # noqa: BLE001 - 发送失败保留积压，下轮重试
+            self.logger.error("[bupt_news] 绑定「%s」推送失败：%s", name, e)
+            return (len(fresh), 0)
+        if sent:
+            store.mark_pushed([r.get("id") for r in batch])
+            self.logger.info("[bupt_news] 绑定「%s」已推送 %d 条活动", name,
+                             len(batch))
+        return (len(fresh), sent)
 
     def _backlog_records(self) -> list[dict]:
         """已落库但尚未推送的记录，按 id 升序（旧 → 新）。
@@ -2108,6 +2637,9 @@ class BuptNewsPlugin(PluginBase):
         否则服务端会当好友私聊发送（非好友发不出去）。
         `records`：本批推送的通知记录，用于判断「是否发给学生」——全都不是给学生的
         时候不 @全体成员。
+
+        第二课堂活动**不走这里**（见 `_send_to_binding`）：活动只发给绑定的单个目标、
+        且绝不 @全体成员 —— 常规招募每条都 @all 会把人吵到退群。
         """
         split = self._split_chain(chain)
         chunks = split if isinstance(split, list) else [split]
@@ -2127,8 +2659,7 @@ class BuptNewsPlugin(PluginBase):
             self.logger.info("[bupt_news] 推送开关已关闭，跳过发送")
             return 0, 0
 
-        groups = self._int_list("groups")
-        users = self._int_list("users")
+        groups, users = self._message_targets()
         if not groups and not users:
             self.logger.warning("[bupt_news] 未配置推送目标，跳过发送")
             return 0, 0
@@ -2184,9 +2715,15 @@ class BuptNewsPlugin(PluginBase):
 
     def _register_commands(self) -> None:
         self._command_names = []
+        # 个别命令需要**跳出**服务范围守卫（在命令内部自己判定资格）：
+        # 目前只有 `dektoken` —— 未绑定的用户必须能收到"你还没绑定"的说明，
+        # 否则被静默吞掉，用户只会觉得"命令没反应"。
+        self._unbound_allowed: set[str] = set()
 
-        def reg(name: str, **kw):
+        def reg(name: str, *, allow_unbound: bool = False, **kw):
             self._command_names.append(name)
+            if allow_unbound:
+                self._unbound_allowed.add(name)
             return self.register_command(name, **kw)
 
         # 私聊可用范围守卫：包在**每一条**命令（含子命令、含命令组本体）外面。
@@ -2197,7 +2734,7 @@ class BuptNewsPlugin(PluginBase):
         #
         # 为什么不能只靠插件把某个权限节点设成 superuser：那同样会把公开命令
         # 抬成仅超管，且/perm 还能被改成别的值而悄悄失效。
-        def _guarded(func):
+        def _guarded(func, *, allow_unbound: bool = False):
             # ⚠️ 这里有两个坑，都是实测踩出来的：
             #
             # 1. **包装器必须自己声明 `packet` 与 `params`。** 框架是
@@ -2225,7 +2762,7 @@ class BuptNewsPlugin(PluginBase):
             @functools.wraps(func)
             async def wrapper(packet=None, params=None, **kwargs):
                 event = getattr(packet, "event", None)
-                if not self.check_access(event):
+                if not allow_unbound and not self.check_access(event):
                     self._log_scope_denied(event)
                     return None               # 静默：与框架隐藏命令的口径一致
                 forward = {k: v for k, v in kwargs.items() if k in wanted}
@@ -2252,9 +2789,10 @@ class BuptNewsPlugin(PluginBase):
 
         def _register_with_guard(name, **kw):
             decorator = original_register(name, **kw)
+            allow_unbound = name in self._unbound_allowed
 
             def _wrap(func):
-                return decorator(_guarded(func))
+                return decorator(_guarded(func, allow_unbound=allow_unbound))
             return _wrap
 
         self.register_command = _register_with_guard
@@ -2316,15 +2854,31 @@ class BuptNewsPlugin(PluginBase):
                 f"🖼 图片缓存：{img_files} 个 / {img_size / 1048576:.1f} MB",
                 f"📊 表格图片：{tbl_files} 个 / {tbl_size / 1048576:.1f} MB",
                 f"📌 置顶：{self._store.pin_count} 条",
+                self._afterclass_status_line(),
             ])
 
         # permission="" 是显式覆盖：子命令不继承父命令的 admin 默认值，即无权限限制
         @reg("buptnews.list", permission="", scope="all",
-             schema=ListSchema, description="分页列出通知编号（最新在前）")
-        async def cmd_list(params):
+             schema=ListSchema,
+             description="分页列出（默认：置顶+通知；--scope=acts/all 看第二课堂活动）")
+        async def cmd_list(params, packet=None):
+            scope = str(getattr(params, "scope", "notices") or "notices").lower()
+            # `-a` 简写：框架把未知短选项丢进 kwargs 后被 schema 丢弃，
+            # 所以从原文里认（`--scope=acts` 是正规写法）
+            raw = getattr(packet, "raw", "") if packet is not None else ""
+            if re.search(r"(?:^|\s)-a(?=\s|$)", str(raw or "")):
+                scope = "acts"
+            if scope not in ("notices", "acts", "all"):
+                scope = "notices"
+            show_notices = scope in ("notices", "all")
+            show_acts = scope in ("acts", "all")
+
             total = self._store.notice_count()
-            if not total:
-                return "📋 暂无通知记录\n💡 等下次同步，或用 /buptnews sync 立即同步"
+            if show_notices and not total:
+                # 只看通知且没有通知时给引导；但如果同时要看活动，先别急着返回
+                if not show_acts:
+                    return ("📋 暂无通知记录\n💡 等下次同步，"
+                            "或用 /buptnews sync 立即同步")
             size = max(1, int(self.config.get("list_page_size", 20) or 20))
             pages = max(1, -(-total // size))          # ceil
             try:
@@ -2332,36 +2886,57 @@ class BuptNewsPlugin(PluginBase):
             except (TypeError, ValueError):
                 want = 1
             page = min(max(1, want), pages)
-            newest_first = list(reversed(self._store.recent_ids(total)))
-            chunk = newest_first[(page - 1) * size: page * size]
-            lines = [f"📋 通知编号（第 {page}/{pages} 页 · 共 {total} 条 · 最新在前）", ""]
-            # 置顶条目**每页都显示在最前**：置顶的意义就是"不用翻页也能看到"
-            # 置顶区：每行只有 `P<n>` + 概要（外部置顶先补齐摘要再渲染）
-            entries = list(reversed(self._store.pinned_entries()))
-            if entries:
-                for e in entries:
-                    if e.get("ext") and not (e.get("notice") or {}).get("summary_ai"):
-                        notice = await self._summarize_external(
-                            dict(e.get("notice") or {}))
-                        if notice.get("summary_ai"):
-                            e["notice"] = notice
-                lines.append(f"📌 置顶（{len(entries)}）")
-                lines += [self._pin_line(e) for e in entries]
+
+            lines: list[str] = []
+            if show_notices:
+                newest_first = list(reversed(self._store.recent_ids(total)))
+                chunk = newest_first[(page - 1) * size: page * size]
+                lines.append(f"📋 通知编号（第 {page}/{pages} 页 · 共 {total} 条 · "
+                             "最新在前）")
                 lines.append("")
-            for i in chunk:
-                lines.append(self._rec_line(i))
-            lines.append("")
-            nav = []
-            if page > 1:
-                nav.append(f"⬅️ 上一页：/buptnews list {page - 1}")
-            if page < pages:
-                nav.append(f"➡️ 下一页：/buptnews list {page + 1}")
+                # 置顶条目**每页都显示在最前**：置顶的意义就是"不用翻页也能看到"
+                entries = list(reversed(self._store.pinned_entries()))
+                if entries:
+                    for e in entries:
+                        if e.get("ext") and not (e.get("notice") or {}).get("summary_ai"):
+                            notice = await self._summarize_external(
+                                dict(e.get("notice") or {}))
+                            if notice.get("summary_ai"):
+                                e["notice"] = notice
+                    lines.append(f"📌 置顶（{len(entries)}）")
+                    lines += [self._pin_line(e) for e in entries]
+                    lines.append("")
+                for i in chunk:
+                    lines.append(self._rec_line(i))
+
+            if show_acts:
+                if lines:
+                    lines.append("")
+                lines += self._activity_list_lines(size)
+
+            if show_notices:
+                lines.append("")
+                nav = []
+                if page > 1:
+                    nav.append(f"⬅️ 上一页：/buptnews list {page - 1}")
+                if page < pages:
+                    nav.append(f"➡️ 下一页：/buptnews list {page + 1}")
+                else:
+                    nav.append("✅ 已是最后一页")
+                lines.append(" · ".join(nav))
             else:
-                nav.append("✅ 已是最后一页")
-            lines.append(" · ".join(nav))
-            lines.append("💡 /buptnews get <编号> 查看全文 · "
-                         "/buptnews search <关键词> 搜索")
+                lines.append("")
+            if scope == "acts":
+                hint = ("💡 活动详情看推送消息 · list 只看通知 · "
+                        "list --scope=all 两者一起看")
+            else:
+                hint = ("💡 /buptnews get <编号> 查看全文 · "
+                        "/buptnews search <关键词> 搜索")
+                if scope == "notices":
+                    hint += " · list --scope=acts 看第二课堂活动"
+            lines.append(hint)
             return "\n".join(lines)
+
 
         @reg("buptnews.pin", permission="superuser", scope="private",
              schema=PinSchema,
@@ -2736,104 +3311,64 @@ class BuptNewsPlugin(PluginBase):
             ]
             return "\n".join(lines)
 
-        @reg("buptnews.bind", permission="superuser", scope="private",
-             schema=BindSchema, description="私聊可用范围：绑定群的临时会话 + 指定用户")
-        async def cmd_bind(params):
-            """私聊可用范围白名单（谁能私聊用小窗/私聊调命令）。
-
-            与 `/buptnews add` 管的是**两件事**：那个是推送目标（往哪发通知），
-            这个是准入（谁能私聊用命令）。混在一起会让「加一个推送用户」意外
-            变成「开放私聊服务」，所以分成两条命令、两份配置。
-            """
-            kind = (params.kind or "user").lower()
-            key = "groups" if kind == "group" else "users"
-            label = "群" if kind == "group" else "用户"
-            uid = int(params.target or 0)
-            action = (params.action or "add").lower()
-            if not uid and action != "list":
-                action = "list"             # 没给号 = 只想看看现状
-            ids = self._to_ids(self._binding().get(key))
-
-            if action == "add":
-                if uid in ids:
-                    return f"ℹ️ {label} {uid} 已在私聊白名单（无需重复添加）"
-                ids.add(uid)
-                self.config.set(f"binding.{key}", sorted(ids))
-                self.logger.info("[bupt_news] 私聊白名单新增 %s %s", kind, uid)
-                tail = ("\n💡 该群成员可在**群聊临时会话（小窗）**用命令"
-                        if kind == "group" else
-                        "\n💡 该用户可直接私聊用命令")
-                return (f"✅ 已把{label} {uid} 加入私聊白名单"
-                        f"（当前 {len(ids)} 个）{tail}")
-            if action == "del":
-                if uid not in ids:
-                    return (f"⚠️ {label} {uid} 不在私聊白名单"
-                            f"（用 /buptnews bind {kind} list 查看）")
-                ids.discard(uid)
-                self.config.set(f"binding.{key}", sorted(ids))
-                self.logger.info("[bupt_news] 私聊白名单移除 %s %s", kind, uid)
-                return f"✅ 已把{label} {uid} 移出私聊白名单（剩余 {len(ids)} 个）"
-
-            groups, users = sorted(self._bound_groups()), sorted(self._bound_users())
-            inherited = not self._to_ids(self._binding().get("groups"))
-            lines = [
-                "🔐 私聊可用范围（谁能私聊用命令）",
-                "",
-                "👥 群聊临时会话（小窗）来源群",
-                *(f"  {g}" for g in groups),
-            ]
-            if not groups:
-                lines.append("  （无：任何群的小窗都不服务）")
-            elif inherited:
-                lines.append("  ↑ 未单独配置：沿用框架 bound_groups（/groups）")
-            lines += ["", f"👤 直接私聊的用户（{len(users)}）"]
-            lines += [f"  {u}" for u in users] or ["  （无：非超级用户不能直接私聊用命令）"]
-            lines += [
-                "",
-                "💡 增删：/buptnews bind user|group <号> [add|del]",
-                "   例：/buptnews bind group 1000000001   —— 允许该群成员的小窗",
-                "       /buptnews bind user 100000004    —— 允许该用户直接私聊",
-                "⚠️ 群里不受此限制；超级用户始终可用（防止把自己锁在外面）",
-            ]
-            return "\n".join(lines)
-
-        @reg("buptnews.targets", permission="superuser", scope="private",
-             description="查看推送目标")
-        async def cmd_targets(packet):
-            groups = self._int_list("groups")
-            users = self._int_list("users")
-            lines = ["📬 推送目标", "", f"👥 群（{len(groups)}）"]
-            lines += [f"  {g}" for g in groups] or ["  （未配置）"]
-            lines += ["", f"👤 用户（{len(users)}）"]
-            lines += [f"  {u}" for u in users] or ["  （未配置）"]
-            lines += ["", "💡 添加：/buptnews add group|user [号]",
-                      "     移除：/buptnews del group|user [号]"]
-            return "\n".join(lines)
-
         @reg("buptnews.add", permission="superuser", scope="private",
-             schema=AddTargetSchema, description="添加推送目标")
+             schema=AddTargetSchema,
+             description="绑定群/用户（准入 + 是否推通知/活动）")
         async def cmd_add(params, event):
-            kind = params.kind
+            """绑定一个目标：既决定**准入**，也决定推什么。
+
+            合并了原来的 `bind`（私聊白名单）与 `add`（推送目标）——
+            分成两套配置时，加一个推送用户会意外变成开放私聊服务。
+            """
+            kind = (params.kind or "group").lower()
             target = params.target
             if not target:
                 if kind == "group" and event.group_id:
                     target = int(event.group_id)
                 else:
-                    return "⚠️ 请指定群号/QQ号（本群可用 add group 省略）"
+                    return "⚠️ 请指定群号/QQ号（本群可用 `add group` 省略）"
             target = int(target)
+            label = "群" if kind == "group" else "用户"
+            switches, errors = self._parse_switches(
+                getattr(params, "switches", None))
+            if errors:
+                return "⚠️ " + "\n⚠️ ".join(errors) + \
+                    "\n💡 例：/buptnews add user 123456 event=on"
+            data = self._targets()
             key = "groups" if kind == "group" else "users"
-            ids = self._int_list(key)
-            if target in ids:
-                return f"{'群' if kind == 'group' else '用户'} {target} 已在推送列表"
-            ids.append(target)
-            self.config.set(key, ids)
-            self.logger.info("[bupt_news] 添加推送目标 %s %s", kind, target)
-            return f"✅ 已添加推送{'群' if kind == 'group' else '用户'} {target}（当前 {len(ids)} 个）"
+            existed = target in data[key]
+            spec = data[key].setdefault(
+                target, {"message": False, "event": False, "token_file": ""})
+            # 新绑定默认：推通知、不推活动；已存在则**只改给了的开关**
+            spec["message"] = switches.get("message", spec["message"]
+                                           if existed else True)
+            spec["event"] = switches.get("event", spec["event"]
+                                         if existed else False)
+            if spec["event"] and not spec.get("token_file"):
+                spec["token_file"] = self._token_path(kind, target)
+            self._save_targets(data)
+            self._refresh_activity_bindings()
+            self.logger.info("[bupt_news] %s {label} %s（message=%s event=%s）",
+                             ("更新绑定" if existed else "新增绑定"),
+                             target, spec["message"], spec["event"])
+            lines = [
+                f"✅ 已{'更新' if existed else '新增'}绑定：{label} {target}",
+                f"  通知推送：{'开' if spec['message'] else '关'}",
+                f"  活动推送：{'开' if spec['event'] else '关'}"
+                + ("（还需 dektoken 提供 JWT）" if spec["event"] else ""),
+                f"  准入：{'可' if (spec['message'] or spec['event']) else '仅可'}"
+                "私聊/小窗使用命令",
+            ]
+            if spec["event"]:
+                lines.append(f"💡 设置 token：/buptnews dektoken {kind} "
+                             + ("" if kind == "user" else f"{target} ") + "<JWT>")
+            return "\n".join(lines)
 
-        @reg("buptnews.del", permission="superuser", scope="private",
-             schema=DelTargetSchema, description="移除推送目标")
-        async def cmd_del(params, event):
-            kind = params.kind
+        @reg("buptnews.set", permission="superuser", scope="private",
+             schema=SetTargetSchema,
+             description="修改绑定的推送开关（message / event）")
+        async def cmd_set(params, event):
+            kind = (params.kind or "group").lower()
             target = params.target
             if not target:
                 if kind == "group" and event.group_id:
@@ -2841,14 +3376,178 @@ class BuptNewsPlugin(PluginBase):
                 else:
                     return "⚠️ 请指定群号/QQ号"
             target = int(target)
+            label = "群" if kind == "group" else "用户"
+            data = self._targets()
             key = "groups" if kind == "group" else "users"
-            ids = self._int_list(key)
-            if target not in ids:
-                return f"⚠️ {target} 不在推送列表中（用 /buptnews targets 查看）"
-            ids = [x for x in ids if x != target]
-            self.config.set(key, ids)
-            self.logger.info("[bupt_news] 移除推送目标 %s %s", kind, target)
-            return f"✅ 已移除推送{'群' if kind == 'group' else '用户'} {target}（剩余 {len(ids)} 个）"
+            if target not in data[key]:
+                return (f"⚠️ {label} {target} 还没有绑定"
+                        f"（用 /buptnews add {kind} {target}）")
+            spec = data[key][target]
+            switches, errors = self._parse_switches(
+                getattr(params, "switches", None))
+            if errors:
+                return "⚠️ " + "\n⚠️ ".join(errors) + \
+                    "\n💡 例：/buptnews set user 123456 event=on"
+            changed = []
+            if "message" in switches:
+                spec["message"] = switches["message"]
+                changed.append(f"通知推送={'开' if spec['message'] else '关'}")
+            if "event" in switches:
+                spec["event"] = switches["event"]
+                changed.append(f"活动推送={'开' if spec['event'] else '关'}")
+                if spec["event"] and not spec.get("token_file"):
+                    spec["token_file"] = self._token_path(kind, target)
+            if not changed:
+                return (f"ℹ️ 没有要改的开关。当前 {label} {target}："
+                        f"通知={'开' if spec['message'] else '关'}，"
+                        f"活动={'开' if spec['event'] else '关'}\n"
+                        "💡 用法：/buptnews set user|group <号> "
+                        "message=on|off event=on|off")
+            self._save_targets(data)
+            self._refresh_activity_bindings()
+            self.logger.info("[bupt_news] 修改绑定 %s %s：%s", kind, target,
+                             "，".join(changed))
+            return f"✅ {label} {target} 已更新：" + "，".join(changed)
+
+        @reg("buptnews.del", permission="superuser", scope="private",
+             schema=DelTargetSchema, description="移除绑定（及其 token）")
+        async def cmd_del(params, event):
+            kind = (params.kind or "group").lower()
+            target = params.target
+            if not target:
+                if kind == "group" and event.group_id:
+                    target = int(event.group_id)
+                else:
+                    return "⚠️ 请指定群号/QQ号"
+            target = int(target)
+            label = "群" if kind == "group" else "用户"
+            data = self._targets()
+            key = "groups" if kind == "group" else "users"
+            if target not in data[key]:
+                return f"⚠️ {label} {target} 没有绑定（用 /buptnews targets 查看）"
+            spec = data[key].pop(target)
+            self._save_targets(data)
+            self._refresh_activity_bindings()
+            self.logger.info("[bupt_news] 移除绑定 %s %s", kind, target)
+            extra = ""
+            # 只删**落在数据目录里**的 token；显式配置的文件是用户的，不动
+            path = self._token_path(kind, target, spec)
+            if spec.get("event") and path.startswith(self._data_dir):
+                try:
+                    os.unlink(path)
+                    extra = "（已删除其 token 文件）"
+                except OSError:
+                    pass
+            return f"✅ 已移除{label} {target}{extra}"
+
+        @reg("buptnews.targets", permission="superuser", scope="private",
+             description="查看绑定：准入 + 通知/活动开关")
+        async def cmd_targets(packet):
+            data = self._targets()
+            lines = ["📬 绑定（一项 = 准入 + 推送开关）", ""]
+            for kind, key in (("group", "groups"), ("user", "users")):
+                label = "群" if kind == "group" else "用户"
+                items = data[key]
+                lines.append(f"👥 {label}（{len(items)}）")
+                if not items:
+                    lines.append("  （未绑定）")
+                for tid, spec in sorted(items.items()):
+                    flags = []
+                    flags.append("通知" if spec["message"] else "不推通知")
+                    if spec["event"]:
+                        tok = self._token_path(kind, tid, spec)
+                        flags.append("活动" + ("" if os.path.exists(tok) else "⚠️缺token"))
+                    else:
+                        flags.append("不推活动")
+                    lines.append(f"  {tid}  " + " · ".join(flags))
+                lines.append("")
+            lines += [
+                "💡 增改：/buptnews add group|user <号> [message=on|off] [event=on|off]",
+                "    改开关：/buptnews set group|user <号> message|event=on|off",
+                "    移除：/buptnews del group|user <号>",
+                "    活动 JWT：/buptnews dektoken user <JWT>",
+                "             /buptnews dektoken group <群号> <JWT>",
+            ]
+            return "\n".join(lines)
+
+        @reg("buptnews.dektoken", permission="", scope="private",
+             schema=DektokenSchema, allow_unbound=True,
+             description="设置第二课堂 JWT（user=自己 / group=需群管理）")
+        async def cmd_dektoken(params, packet=None):
+            """给绑定设置 JWT。**非超管也能用**，所以权限在函数里逐条判定：
+
+            * `user`：只能设自己，且必须已 `event=on` 绑定了自己；
+            * `group`：必须指定群号、该群已 `event=on`，且调用者是**群主/管理员**。
+            """
+            kind = (params.kind or "user").lower()
+            rest = [str(x) for x in (getattr(params, "rest", None) or [])]
+            event = getattr(packet, "event", None)
+            uid = int(getattr(event, "user_id", 0) or 0)
+            if not uid:
+                return "❓ 无法识别你的 QQ 号"
+
+            if kind == "user":
+                if len(rest) != 1:
+                    return ("⚠️ 用法：/buptnews dektoken user <JWT>\n"
+                            "   （只能设置**你自己**的 token）")
+                target, token = uid, rest[0]
+                spec = self._target("user", target)
+                if not spec:
+                    return ("⚠️ 你还没有绑定，不能设置 token。\n"
+                            f"💡 让管理员执行：/buptnews add user {target} event=on")
+                if not spec["event"]:
+                    return ("⚠️ 你的绑定没有启用活动推送（event=off）。\n"
+                            f"💡 让管理员执行：/buptnews set user {target} event=on")
+                # "仅能设置自己的"：光靠"只能用自己 QQ 号"不够 —— 粘别人的 token
+                # 同样会写进自己的绑定，必须核对 JWT 里的 sub。
+                sub = str(decode_jwt(token).get("sub") or "")
+                if sub != str(target):
+                    return ("⚠️ 这个 token 不是你的（JWT 里的 sub 与你的 QQ 号不一致）。\n"
+                            "   请粘贴**你自己**登录后的 token")
+            else:
+                if len(rest) != 2:
+                    return ("⚠️ 用法：/buptnews dektoken group <群号> <JWT>")
+                try:
+                    target = int(rest[0])
+                except (TypeError, ValueError):
+                    return "⚠️ 群号必须是数字"
+                token = rest[1]
+                spec = self._target("group", target)
+                if not spec:
+                    return (f"⚠️ 群 {target} 还没有绑定。\n"
+                            f"💡 让管理员执行：/buptnews add group {target} event=on")
+                if not spec["event"]:
+                    return (f"⚠️ 群 {target} 没有启用活动推送（event=off）。\n"
+                            f"💡 让管理员执行：/buptnews set group {target} event=on")
+                role = await self._group_role_of(target, uid)
+                if role not in ("owner", "admin"):
+                    return (f"⚠️ 只有群 {target} 的**群主或管理员**能设置它的 token"
+                            f"（当前身份：{role or '未知'}）")
+
+            # 写盘 + 立即生效（不重启）
+            try:
+                path = self._write_token(kind, target, token)
+            except OSError as e:
+                return f"❌ 保存 token 失败：{e}"
+            data = self._targets()
+            key = "groups" if kind == "group" else "users"
+            data[key][target]["token_file"] = path
+            self._save_targets(data)
+            binding = self._refresh_activity_bindings()
+            ok = any(b["kind"] == kind and b["target"] == target
+                     and b["client"].available for b in binding)
+            self.logger.info("[bupt_news] 已更新 %s %s 的第二课堂 token（有效=%s）",
+                             kind, target, ok)
+            if not ok:
+                return ("⚠️ token 已保存，但它**不是有效的 JWT**（解不出 sub）。\n"
+                        "   请确整段复制 `localStorage[\"secondclass.tokenv3\"]` 的值。")
+            exp = None
+            for b in binding:
+                if b["kind"] == kind and b["target"] == target:
+                    exp = b["client"].expiry()
+            tail = f"（有效期至 {exp:%Y-%m-%d %H:%M}）" if exp else ""
+            return (f"✅ 已保存 {'群' if kind == 'group' else '用户'} "
+                    f"{target} 的第二课堂 token{tail}，活动同步已生效")
 
         @reg("buptnews.on", permission="superuser", scope="private", description="开启推送")
         async def cmd_on(packet):

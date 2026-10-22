@@ -70,6 +70,13 @@ git clone https://github.com/Green1423/ncqqpy-plugin-bupt-news plugins/bupt_news
     "retry_timeout": 120,
     "retry_batch_size": 6
   },
+  "afterclass": {
+    "enabled": false,
+    "base": "https://dekt.bupt.edu.cn",
+    "max_per_round": 5,
+    "max_records": 300,
+    "bindings": []
+  },
   "images": {
     "enabled": true,
     "max_bytes": 10485760,

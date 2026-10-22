@@ -1,0 +1,262 @@
+###############################################################################
+# 北邮「第二课堂」小程序 API 集合
+# 用法：VS Code REST Client / IntelliJ HTTP Client / httpyac
+# 1) 先跑「登录」拿 token，填到 @token
+# 2) 跑「当前用户」拿 @userId 与 digest
+###############################################################################
+
+@base = https://dekt.bupt.edu.cn
+@token = eyJhbGciOi...
+@userId = 12345
+@digest = 0
+@actId = 1234
+@identity = 0
+
+###############################################################################
+# 认证
+###############################################################################
+
+### 1. 账号密码登录（419/420 时需 captcha）
+POST {{base}}/api/v1/auth/sessions
+Content-Type: application/x-www-form-urlencoded
+
+username=2021xxxxxx&password=******&code=&captcha=
+
+### 2. 微信登录（code 来自 wx.login）
+POST {{base}}/api/v1/auth/wechat/sessions
+Content-Type: application/x-www-form-urlencoded
+
+code=081xxxx
+
+### 3. 解绑微信
+DELETE {{base}}/api/v1/auth/wechat
+Authorization: Bearer {{token}}
+
+###############################################################################
+# 用户 / 组织
+###############################################################################
+
+### 4. 当前用户（返回 data + digest）
+GET {{base}}/api/v1/user/{{userId}}
+Authorization: Bearer {{token}}
+
+### 5. 修改资料
+PUT {{base}}/api/v1/user/{{userId}}
+Authorization: Bearer {{token}}
+Content-Type: application/x-www-form-urlencoded
+
+email=me@bupt.edu.cn&phone=13800000000
+
+### 6. 普通角色
+GET {{base}}/api/v1/role/normal
+Authorization: Bearer {{token}}
+
+### 7. 学院/组织
+GET {{base}}/api/v1/group/org-college
+Authorization: Bearer {{token}}
+
+### 8. 社团
+GET {{base}}/api/v1/group/societies
+Authorization: Bearer {{token}}
+
+###############################################################################
+# 活动与报名
+###############################################################################
+
+### 9. 活动列表（digest 用用户 digest）
+GET {{base}}/api/v1/activity?college_id=1&class_id=0&grade=2021&role_id=0&digest={{digest}}&is_group=0
+Authorization: Bearer {{token}}
+
+### 10. 活动详情
+GET {{base}}/api/v1/activity/{{actId}}
+Authorization: Bearer {{token}}
+
+### 11. 活动分类
+GET {{base}}/api/v1/activity/class
+Authorization: Bearer {{token}}
+
+### 12. 报名
+POST {{base}}/api/v1/participation/{{actId}}
+Authorization: Bearer {{token}}
+Content-Type: application/x-www-form-urlencoded
+
+digest={{digest}}&start_t_ms=1700000000000&end_t_ms=1700000000000&target_id=0&target_role=0&grade=2021&customer=0&demands=1
+
+### 13. 取消报名（DELETE 的 data 会拼到 query）
+DELETE {{base}}/api/v1/participation/{{actId}}?digest={{digest}}
+Authorization: Bearer {{token}}
+
+### 14. 我参与的活动
+GET {{base}}/api/v1/participation/acts?page=1&page_size=40
+Authorization: Bearer {{token}}
+
+### 15. 我管理的活动
+GET {{base}}/api/v1/participation/admin/act?act_state=1&group_as_admin=0
+Authorization: Bearer {{token}}
+
+### 16. 活动管理员列表
+GET {{base}}/api/v1/participation/admin/act/{{actId}}?identity={{identity}}&digest={{digest}}
+Authorization: Bearer {{token}}
+
+### 17. 添加管理员
+POST {{base}}/api/v1/participation/admin/act/{{actId}}
+Authorization: Bearer {{token}}
+Content-Type: application/x-www-form-urlencoded
+
+identity={{identity}}&digest={{digest}}&new_user_id=10001&new_identity=0
+
+### 18. 删除管理员
+DELETE {{base}}/api/v1/participation/admin/act/{{actId}}?identity={{identity}}&digest={{digest}}&delete_user_id=10001
+Authorization: Bearer {{token}}
+
+### 19. 结束活动
+PUT {{base}}/api/v1/participation/admin/act/{{actId}}
+Authorization: Bearer {{token}}
+Content-Type: application/x-www-form-urlencoded
+
+digest={{digest}}&identity={{identity}}
+
+### 20. 订阅设置
+GET {{base}}/api/v1/preference
+Authorization: Bearer {{token}}
+
+### 21. 更新订阅设置
+PUT {{base}}/api/v1/preference
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{}
+
+### 22. 订阅活动
+POST {{base}}/api/v1/subscription/{{actId}}?college_id=1&grade=2021&role_id=0
+Authorization: Bearer {{token}}
+
+### 23. 取消订阅
+DELETE {{base}}/api/v1/subscription/{{actId}}?college_id=1&grade=2021&role_id=0
+Authorization: Bearer {{token}}
+
+###############################################################################
+# 签到
+###############################################################################
+
+### 24. 用户签到码（X-Trace 任意 trace 字符串）
+GET {{base}}/api/v1/checkin/qrcode/user
+Authorization: Bearer {{token}}
+X-Trace: trace-abc123
+
+### 25. 轮询签到结果
+GET {{base}}/api/v1/checkin/status?trace=trace-abc123
+Authorization: Bearer {{token}}
+
+### 26. 管理员扫用户码（X-Token = Base64(刚拉到的签到码对象)）
+POST {{base}}/api/v1/checkin/passive
+Authorization: Bearer {{token}}
+X-Token: eyJpYXQiOjE3MDAwMDAwMDB9
+Content-Type: application/x-www-form-urlencoded
+
+data=
+
+### 27. BLE 签到（packet = 广播包 hex）
+POST {{base}}/api/v1/checkin/ble/1a2b3c4d
+Authorization: Bearer {{token}}
+Content-Type: application/x-www-form-urlencoded
+
+data=
+
+### 28. 管理员动态签到码（opr_type: 0 签到 / 1 签退）
+GET {{base}}/api/v1/checkin/qrcode/admin/{{actId}}/0
+Authorization: Bearer {{token}}
+
+### 29. 签到动态列表
+GET {{base}}/api/v1/checkin/dynamic_list?act_id={{actId}}&opr_type=0&limit=99999999&last_id=0
+Authorization: Bearer {{token}}
+
+###############################################################################
+# 新闻
+###############################################################################
+
+### 30. 新闻预览
+GET {{base}}/api/v1/news/preview
+Authorization: Bearer {{token}}
+
+### 31. 栏目树
+GET {{base}}/api/v1/news/tree
+Authorization: Bearer {{token}}
+
+### 32. 新闻搜索
+POST {{base}}/api/v1/news/search
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "tree_id": "",
+  "time": { "from": "2024-01-01", "to": "2025-01-01" },
+  "query": "",
+  "size": 10,
+  "offset": 0,
+  "type": "all"
+}
+
+###############################################################################
+# 积分商城
+###############################################################################
+
+### 33. 商品列表
+GET {{base}}/api/v1/store/product?status=0&detail=0&target_id=-1
+Authorization: Bearer {{token}}
+
+### 34. 商品详情
+GET {{base}}/api/v1/store/product/1
+Authorization: Bearer {{token}}
+
+### 35. 兑换下单
+POST {{base}}/api/v1/store/order
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "product_id": 1, "count": 1, "redeem_type": 3 }
+
+### 36. 兑换记录
+GET {{base}}/api/v1/store/orderRecords?page=1&limit=0&filter=0
+Authorization: Bearer {{token}}
+
+### 37. 积分流水
+GET {{base}}/api/v1/store/scoreRecords?page=1&limit=0
+Authorization: Bearer {{token}}
+
+### 38. 我的积分
+GET {{base}}/api/v1/store/score
+Authorization: Bearer {{token}}
+
+###############################################################################
+# 成绩单 PDF
+###############################################################################
+
+### 39. 生成任务列表
+GET {{base}}/api/v1/transcript/pdf/generate-jobs
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+### 40. 提交生成
+POST {{base}}/api/v1/transcript/pdf/generate
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "email": "me@bupt.edu.cn", "semesters": ["2024-2025-1"], "types": [1, 2, 3] }
+
+###############################################################################
+# 辅助
+###############################################################################
+
+### 远程配置
+GET {{base}}/config/index.json
+
+### umami 统计
+POST {{base}}/api/v1/event/send?_=abc123
+Content-Type: application/json
+X-UApp-Version: 1.0.0
+
+{ "type": "event", "payload": { "name": "test" } }
+
+### 图片直链
+GET {{base}}/api/v1/image/2024/01/xxx.png

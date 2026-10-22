@@ -308,6 +308,28 @@ def build_harness(cfg_path: Path, api, data_dir=None):
 
 # ---------------------------------------------------------------- 测试
 
+def _push(plugin, *, groups=None, users=None):
+    """把推送目标写进 `targets`（新模型唯一来源）。
+
+    传 None 表示"这一侧不动"；传了就按它精确设 `message` 开关，
+    并保留已有绑定（绑定 = 准入，删了会影响访问用例）。
+    """
+    data = plugin._targets()
+    for key, want in (("groups", groups), ("users", users)):
+        if want is None:
+            continue
+        ids = {int(x) for x in want}
+        cur = data[key]
+        for tid, spec in cur.items():
+            spec["message"] = tid in ids
+        for tid in ids - set(cur):
+            cur[tid] = {"message": True, "event": False, "token_file": ""}
+    plugin.config.set("targets", {
+        "groups": {str(t): dict(v) for t, v in data["groups"].items()},
+        "users": {str(t): dict(v) for t, v in data["users"].items()},
+    })
+
+
 async def main(online: bool) -> int:
     if TMP.exists():
         shutil.rmtree(TMP)
@@ -526,8 +548,7 @@ async def main(online: bool) -> int:
     plugin.config.set("username", "u")
     plugin.config.set("password", "p")
     plugin.config.set("enabled", True)
-    plugin.config.set("groups", [GROUP_BOUND])
-    plugin.config.set("users", [])
+    _push(plugin, groups=[GROUP_BOUND], users=[])
     plugin.config.set("first_run_backfill", 0)
     # 免打扰置成「同日同点」= 关闭：否则自检在北京时间 23:00–07:00 跑时推送会被抑制，
     # 出现「白天全绿、半夜全红」的时间敏感失败。需要免打扰的用例自己显式设窗口或用桩。
@@ -579,7 +600,7 @@ async def main(online: bool) -> int:
 
     # 多目标：群 + 用户
     api.sent.clear()
-    plugin.config.set("users", [10000001])
+    _push(plugin, users=[10000001])
     n_new2 = make_notice(Notice, "142500", "新通知：第二条")
     plugin._portal = FakePortal([n_new2, n_mid, n_old])
     r4 = await plugin._sync_once(reason="test")
@@ -600,7 +621,7 @@ async def main(online: bool) -> int:
 
     # 多目标、多条通知 → 聚合成一条；积压与新通知合并推送
     api.sent.clear()
-    plugin.config.set("users", [])
+    _push(plugin, users=[])
     n_a = make_notice(Notice, "142601", "批量通知 A")
     n_b = make_notice(Notice, "142602", "批量通知 B")
     plugin._portal = FakePortal([n_b, n_a, n_new3, n_mid, n_old])
@@ -631,13 +652,13 @@ async def main(online: bool) -> int:
     check("父命令 buptnews 已注册", "buptnews" in names)
     parent = cmds.list_commands().get("buptnews")
     subs = set(parent.subcommands.keys()) if parent else set()
-    for expect in ("status", "list", "get", "targets", "add", "del",
-                   "on", "off", "interval", "sync", "images", "bind",
+    for expect in ("status", "list", "get", "targets", "add", "set", "del",
+                   "dektoken", "on", "off", "interval", "sync", "images",
                    "search", "pin", "unpin"):
         check(f"子命令已注册 {expect}", expect in subs, str(sorted(subs)))
     check("子命令未占用顶层命名空间",
           not any(n.startswith("buptnews.") for n in names), str(sorted(names)))
-    check("子命令挂在父命令下", parent is not None and len(parent.subcommands) == 15,
+    check("子命令挂在父命令下", parent is not None and len(parent.subcommands) == 16,
           str(sorted(parent.subcommands)) if parent else "no parent")
 
     check("定时任务已注册", "bupt_news.sync" in timer._metas, str(list(timer._metas)))
@@ -669,16 +690,17 @@ async def main(online: bool) -> int:
 
     # 权限维度：普通成员私聊执行 add（需 superuser）应被拒绝
     res2, _ = await dispatch("/buptnews add user 12345678", "private", 10001)
-    check("非超级用户无法 add 目标", 12345678 not in plugin._int_list("users"),
-          f"users={plugin._int_list('users')}")
+    check("非超级用户无法 add 目标",
+          12345678 not in plugin._targets()["users"],
+          f"users={sorted(plugin._targets()['users'])}")
     # 框架以 ("_not_found", cmd) 隐藏命令存在性，客户端会回“未知命令”
     check("权限不足返回隐藏命令哨兵",
           isinstance(res2, tuple) and res2[0] == "_not_found", repr(res2))
 
     # 超级用户私聊可以 add / interval
     await dispatch("/buptnews add user 12345678", "private", SUPERUSER)
-    check("超级用户可添加用户目标", 12345678 in plugin._int_list("users"),
-          str(plugin._int_list("users")))
+    check("超级用户可添加用户目标", 12345678 in plugin._targets()["users"],
+          str(sorted(plugin._targets()["users"])))
 
     await dispatch("/buptnews interval 30m", "private", SUPERUSER)
     check("interval 支持 30m 人类可读格式", plugin.config.get("interval") == 1800,
@@ -710,8 +732,9 @@ async def main(online: bool) -> int:
           f"enabled={plugin.config.get('enabled')}")
 
     await dispatch("/buptnews add user 12345679", "private", USER_ALLOWED)
-    check("组管理员私聊不能添加目标（需 superuser）", 12345679 not in plugin._int_list("users"),
-          str(plugin._int_list("users")))
+    check("组管理员私聊不能添加目标（需 superuser）",
+          12345679 not in plugin._targets()["users"],
+          str(sorted(plugin._targets()["users"])))
 
     # admin 级子命令：sync 为 scope=all + admin；list/get 显式声明无权限
     res_list, _ = await dispatch("/buptnews list", "group", 10001, GROUP_BOUND)
@@ -951,9 +974,9 @@ async def main(online: bool) -> int:
     print("\n[5.7] 私聊可用范围（绑定群小窗 + 指定用户）")
 
     # 白名单夹具：只放行 GROUP_BOUND 的小窗与 USER_ALLOWED 的直接私聊
-    check("夹具已显式配置 binding（不吃默认值）",
-          plugin._bound_groups() == {GROUP_BOUND}
-          and plugin._bound_users() == {USER_ALLOWED},
+    check("夹具的绑定/白名单已生效（不吃默认值）",
+          GROUP_BOUND in plugin._bound_groups()
+          and USER_ALLOWED in plugin._bound_users(),
           f"groups={sorted(plugin._bound_groups())} users={sorted(plugin._bound_users())}")
 
     def access(message_type="private", user_id=USER_ALLOWED, group_id=None):
@@ -1000,78 +1023,104 @@ async def main(online: bool) -> int:
     check("/help <命令>：绑定群小窗里看得到详情",
           "/buptnews" in d_temp and "子命令" in d_temp, d_temp[:120])
 
-    # 白名单管理命令
-    bind_out = await help_output("/buptnews bind", "private", SUPERUSER)
-    check("bind：列出绑定群小窗来源群",
-          "私聊可用范围" in bind_out and str(GROUP_BOUND) in bind_out, bind_out[:200])
-    check("bind：列出白名单用户",
-          str(USER_ALLOWED) in bind_out, bind_out[-260:])
-
-    await dispatch("/buptnews bind user 10001", "private", SUPERUSER)
-    check("bind user 加入白名单并落库",
-          plugin._bound_users() == {USER_ALLOWED, 10001}
-          and plugin._to_ids(plugin.config.get("binding.users")) == {USER_ALLOWED, 10001},
-          f"users={sorted(plugin._bound_users())} cfg={plugin.config.get('binding.users')}")
-    res_new, _ = await dispatch("/buptnews list", "private", 10001)
-    check("加入白名单后立刻可私聊用命令", not isinstance(res_new, tuple), repr(res_new))
-    res_dup, text_dup = await dispatch("/buptnews bind user 10001", "private", SUPERUSER)
-    check("bind 重复添加有提示且不重复入库",
-          "已在" in text_dup and plugin._bound_users() == {USER_ALLOWED, 10001},
-          text_dup[:60])
-
-    await dispatch("/buptnews bind user 10001 del", "private", SUPERUSER)
-    check("bind del 移出白名单",
-          plugin._bound_users() == {USER_ALLOWED},
-          f"users={sorted(plugin._bound_users())}")
-    res_rev, _ = await dispatch("/buptnews list", "private", 10001)
-    check("移出后立刻失效（私聊）", res_rev is None, repr(res_rev))
-    res_temp2, _ = await dispatch("/buptnews list", "private", 10001, GROUP_BOUND)
-    check("移出后小窗仍可用（范围是两条独立通道）",
-          not isinstance(res_temp2, tuple), repr(res_temp2))
-    _, text_absent = await dispatch("/buptnews bind user 10001 del", "private", SUPERUSER)
-    check("bind del 不存在的条目给出提示", "不在" in text_absent, text_absent[:60])
-
-    await dispatch("/buptnews bind group 100000002", "private", SUPERUSER)
-    check("bind group 加入小窗白名单",
-          plugin._bound_groups() == {GROUP_BOUND, 100000002},
-          f"groups={sorted(plugin._bound_groups())}")
-    check("新加群的小窗立即可用", access("private", 10001, 100000002))
-    await dispatch("/buptnews bind group 100000002 del", "private", SUPERUSER)
-    check("bind group del 撤销小窗白名单",
-          plugin._bound_groups() == {GROUP_BOUND},
-          f"groups={sorted(plugin._bound_groups())}")
-
-    # 管理命令本身也走范围闸门（超管豁免），非超管连看都看不到
-    res_ba, _ = await dispatch("/buptnews bind user 10001", "private", USER_ALLOWED)
-    check("非超管不能改私聊白名单",
-          plugin._bound_users() == {USER_ALLOWED} and isinstance(res_ba, tuple),
-          f"users={sorted(plugin._bound_users())} res={res_ba!r}")
-
-    # 默认值：binding 为空 → 只服务超级用户（最小权限），群聊不受影响
-    keep = plugin.config.get("binding")
-    plugin.config.set("binding", {"groups": [], "users": []})
+    # ⚠️ 这一整块会把 `targets` 写进配置（add/set/del 就是写配置），
+    # 而后续同步用例仍在写旧的 groups/users —— 不恢复的话旧键会被
+    # 「targets 已存在」的判定忽略，推送目标就变成这里留下的那批。
+    _targets_snapshot = plugin.config.get("targets")
     try:
-        check("默认（两个清单都空）：非超管私聊一律不服务", not access("private", USER_ALLOWED))
-        check("默认：绑定群的来源小窗也不再放行", not access("private", 10001, GROUP_BOUND))
-        check("默认：超级用户照旧豁免", access("private", SUPERUSER))
-        check("默认：群聊照旧不受限", access("group", 10001, GROUP_BOUND))
-    finally:
-        plugin.config.set("binding", keep)
+        # 绑定管理：`add` 已合并原来的 `bind`（一项绑定 = 准入 + 推送开关）
+        tg = await help_output("/buptnews targets", "private", SUPERUSER)
+        check("targets：列出绑定",
+              "绑定" in tg and str(GROUP_BOUND) in tg, tg[:200])
 
-    # 写坏的配置不该炸掉命令：非字典段 / 少写方括号 / bool 笔误
-    for broken in ("nope", [1, 2], 123, None):
-        plugin.config.set("binding", broken)
+        await dispatch("/buptnews add user 10001", "private", SUPERUSER)
+        spec = plugin._targets()["users"].get(10001) or {}
+        check("add user 建立绑定（默认推通知、不推活动）",
+              spec.get("message") is True and spec.get("event") is False, str(spec))
+        res_new, _ = await dispatch("/buptnews list", "private", 10001)
+        check("★ 绑定即准入：add 之后立刻能私聊用命令",
+              not isinstance(res_new, tuple), repr(res_new))
+
+        before = len(plugin._targets()["users"])
+        await dispatch("/buptnews add user 10001", "private", SUPERUSER)
+        check("重复 add 幂等（不重复建条目）",
+              len(plugin._targets()["users"]) == before, str(before))
+
+        await dispatch("/buptnews set user 10001 event=on", "private", SUPERUSER)
+        check("set 打开活动推送",
+              plugin._targets()["users"][10001]["event"] is True,
+              str(plugin._targets()["users"][10001]))
+        await dispatch("/buptnews set user 10001 message=off", "private", SUPERUSER)
+        check("set 关掉通知推送",
+              plugin._targets()["users"][10001]["message"] is False,
+              str(plugin._targets()["users"][10001]))
+        await dispatch("/buptnews set user 10001", "private", SUPERUSER)
+        check("set 不给开关时什么都不改（幂等）",
+              plugin._targets()["users"][10001] == {"message": False, "event": True,
+                                                   "token_file": plugin._targets()["users"][10001].get("token_file")},
+              str(plugin._targets()["users"][10001]))
+        _, bad = await dispatch("/buptnews set user 10001 event=maybe", "private", SUPERUSER)
+        check("set 非法开关值有明确提示", "认不出" in bad, bad[:80])
+
+        await dispatch("/buptnews del user 10001", "private", SUPERUSER)
+        check("del 移除绑定", 10001 not in plugin._targets()["users"],
+              str(sorted(plugin._targets()["users"])))
+        res_rev, _ = await dispatch("/buptnews list", "private", 10001)
+        check("★ 移除后立刻失效（私聊）", res_rev is None, repr(res_rev))
+        res_temp2, _ = await dispatch("/buptnews list", "private", 10001, GROUP_BOUND)
+        check("移除用户绑定后小窗仍可用（准入有两条独立通道）",
+              not isinstance(res_temp2, tuple), repr(res_temp2))
+
+        await dispatch("/buptnews add group 100000002", "private", SUPERUSER)
+        check("add group 建立群绑定", 100000002 in plugin._targets()["groups"],
+              str(sorted(plugin._targets()["groups"])))
+        check("新加群的小窗立即可用", access("private", 10001, 100000002))
+        await dispatch("/buptnews del group 100000002", "private", SUPERUSER)
+        check("del group 撤销群绑定",
+              plugin._bound_groups() == {GROUP_BOUND},
+              f"groups={sorted(plugin._bound_groups())}")
+
+        # 管理命令本身也走范围闸门（超管豁免），非超管连看都看不到
+        res_ba, _ = await dispatch("/buptnews add user 10001", "private", USER_ALLOWED)
+        check("非超管不能改绑定",
+              10001 not in plugin._targets()["users"] and isinstance(res_ba, tuple),
+              f"users={sorted(plugin._targets()['users'])} res={res_ba!r}")
+
+        # bind 已删除：只剩 add（未知子命令会落到父命令的帮助）
+        check("★ bind 已删除（合并进 add）", "bind" not in parent.subcommands,
+              str(sorted(parent.subcommands)))
+
+        # 默认值：targets 为空 → 只服务超级用户（最小权限），群聊不受影响
+        keep_targets = plugin.config.get("targets")
+        plugin.config.set("targets", {"groups": {}, "users": {}})
         try:
-            check(f"binding={broken!r} 写坏时判定不抛异常且按空处理",
-                  access("private", SUPERUSER) and not access("private", USER_ALLOWED)
-                  and plugin._bound_users() == set(),
-                  repr(plugin.config.get("binding")))
+            check("默认（没有任何绑定）：非超管私聊一律不服务",
+                  not access("private", USER_ALLOWED))
+            check("默认：绑定群的来源小窗也不再放行",
+                  not access("private", 10001, GROUP_BOUND))
+            check("默认：超级用户照旧豁免", access("private", SUPERUSER))
+            check("默认：群聊照旧不受限", access("group", 10001, GROUP_BOUND))
         finally:
-            plugin.config.set("binding", keep)
-    plugin.config.set("binding.users", [True, "abc", None, -5, "10001"])
-    check("白名单里的脏值被丢弃、合法值被收下",
-          plugin._bound_users() == {10001}, f"users={sorted(plugin._bound_users())}")
-    plugin.config.set("binding.users", [USER_ALLOWED])
+            plugin.config.set("targets", keep_targets)
+
+        # 写坏的配置不该炸掉命令：非字典段 / 列表 / bool 笔误 / 脏键
+        for broken in ("nope", [1, 2], 123, None, {"groups": "x", "users": {}}, 
+                       {"users": {"abc": True, "10001": "yes", "": {}}}):
+            plugin.config.set("targets", broken)
+            try:
+                bound = plugin._bound_users()
+                check(f"targets={broken!r} 写坏时不抛异常",
+                      isinstance(bound, set), repr(bound))
+            finally:
+                plugin.config.set("targets", keep_targets)
+        plugin.config.set("targets", {"groups": {}, "users": {
+            "abc": {"message": True}, "10001": {"message": True},
+            "-5": {"message": True}, "": {"message": True}}})
+        check("绑定表里的脏键被丢弃、合法键被收下",
+              plugin._bound_users() == {10001}, f"users={sorted(plugin._bound_users())}")
+        plugin.config.set("targets", keep_targets)
+    finally:
+        plugin.config.set("targets", _targets_snapshot)
 
     check("被拒的私聊只记日志、不回任何提示（不暴露命令存在）",
           plugin._scope_denied.get(10001, (0.0, 0))[0] > 0,
@@ -1113,8 +1162,7 @@ async def main(online: bool) -> int:
     plugin._store = StateStore(str(TMP / "data" / "q.json"),
                                str(TMP / "data" / "q-notices.jsonl"), retention=50)
     plugin._store.note_digest(plugin._today())      # 本段先测普通列表路径
-    plugin.config.set("groups", [GROUP_BOUND])
-    plugin.config.set("users", [])
+    _push(plugin, groups=[GROUP_BOUND], users=[])
     plugin._summarizer = FakeSummarizer()
     n_base = make_notice(Notice, "150000", "基线通知")
     plugin._portal = FakePortal([n_base])
@@ -1449,7 +1497,7 @@ async def main(online: bool) -> int:
         message_type="private", user_id=SUPERUSER,
         message=[{"type": "text", "data": {"text": "/buptnews targets"}}],
         raw_message="/buptnews targets")))
-    check("targets 返回推送目标", "推送目标" in tt, tt[:80])
+    check("targets 返回绑定表", "绑定" in tt and "群" in tt, tt[:80])
 
     # get 的 Schema 校验：非数字应被拒（不抛异常）
     tbad = flat(await cmds.handle(MessageEvent(
@@ -1970,8 +2018,7 @@ async def main(online: bool) -> int:
     # ---- 推送/早报过长同样分段 ----
     api.sent.clear()
     plugin.config.set("chunk", {"max_chars": 120, "max_images": 0})
-    plugin.config.set("groups", [GROUP_BOUND])
-    plugin.config.set("users", [])
+    _push(plugin, groups=[GROUP_BOUND], users=[])
     plugin.config.set("enabled", True)
     digest_recs = [{"id": i, "newsid": str(i), "title": f"通知标题{i}",
                     "summary": ""} for i in range(1, 9)]
@@ -1985,7 +2032,7 @@ async def main(online: bool) -> int:
     # 复原配置，避免影响后续用例
     plugin.config.set("chunk", {"max_chars": 1200, "max_images": 4})
     plugin.config.set("body_max_chars", 800)
-    plugin.config.set("groups", [])
+    _push(plugin, groups=[])
 
     # ---- 框架层：命令返回 list 时，客户端按顺序逐条发送 ----
     from napcat.client import NapCatClient
@@ -2034,8 +2081,7 @@ async def main(online: bool) -> int:
             "summary": f"第{i}条摘要", "images": [],
         })
     plugin.config.set("list_page_size", 20)
-    plugin.config.set("groups", [GROUP_BOUND])
-    plugin.config.set("users", [10000001])
+    _push(plugin, groups=[GROUP_BOUND], users=[10000001])
 
     st_txt = await run_img_cmd("/buptnews status")
     check("status：有分区标题（⚙️ 运行 / 📬 目标 / 📊 记录）",
@@ -2081,9 +2127,12 @@ async def main(online: bool) -> int:
 
     tg_txt = await run_img_cmd("/buptnews targets")
     check("targets：分群/用户两段并带数量",
-          "👥 群（1）" in tg_txt and "👤 用户（1）" in tg_txt, tg_txt[:120])
+          "👥 群（" in tg_txt and "👥 用户（" in tg_txt, tg_txt[:160])
+    check("targets：标出通知/活动开关",
+          "通知" in tg_txt and "活动" in tg_txt, tg_txt[:200])
     check("targets：结尾给增删用法",
-          "💡 添加：" in tg_txt and "/buptnews del" in tg_txt, tg_txt[-90:])
+          "add group|user" in tg_txt and "/buptnews del" in tg_txt,
+          tg_txt[-160:])
 
     help_txt = await run_img_cmd("/help")
     check("help：首行是 `📖 可用命令（N）`",
@@ -2198,8 +2247,7 @@ async def main(online: bool) -> int:
     # 插件 preview：小窗里执行也要带来源群
     plugin._store = StateStore(str(TMP / "data" / "temp.json"),
                                str(TMP / "data" / "temp-notices.jsonl"), retention=50)
-    plugin.config.set("groups", [])
-    plugin.config.set("users", [])
+    _push(plugin, groups=[], users=[])
     plugin._portal = FakePortal([make_notice(Notice, "210001", "小窗预览通知")])
     api.sent.clear()
     await plugin._sync_once(reason="test", force_push=True,
@@ -2209,7 +2257,7 @@ async def main(online: bool) -> int:
           and api.temp_sessions
           and api.temp_sessions[-1] == (str(SUPERUSER), str(GROUP_BOUND)),
           str(api.temp_sessions) if api.sent else "no send")
-    plugin.config.set("groups", [GROUP_BOUND])
+    _push(plugin, groups=[GROUP_BOUND])
 
     # 参数校验失败：回执由框架产出（handle() 的返回值），路由由分发器 _reply_command 负责
     # ⚠️ 断言看 `stub.api`：回执走分发器（stub），不是插件自己的 api。
@@ -2692,8 +2740,7 @@ async def online_tests(Notice, plugin=None, api=None, cmds=None):
                 plugin._store = StateStore(str(TMP / "data" / "live.json"),
                                            str(TMP / "data" / "live-notices.jsonl"),
                                            retention=50)
-                plugin.config.set("groups", [])
-                plugin.config.set("users", [99999999])   # 由 FakeApi 接住
+                _push(plugin, groups=[], users=[99999999])   # 由 FakeApi 接住
                 plugin.config.set("enabled", True)
                 real_inq = plugin._in_quiet_hours
                 plugin._in_quiet_hours = lambda now=None: False

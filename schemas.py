@@ -9,10 +9,45 @@ from napcat.command import (
 
 
 class AddTargetSchema(CommandSchema):
+    """绑定一个群/用户：一举决定**准入**与**推什么**。
+
+    `bind`（私聊白名单）与 `add`（推送目标）已合并到这里 —— 一项绑定既是
+    "这个群/用户可以用命令"，也决定要不要给他推通知/活动。
+    """
+
     kind = ChoiceField(["group", "user"], default="group",
                        description="目标类型：group=群 / user=QQ用户")
     target = QQField(required=False,
                      description="群号或 QQ 号；群聊中省略则用当前群")
+    # ⚠️ 两个开关用 variadic 自己解析，而不是 BoolField 位置参数：
+    # 框架只认 `--key=value`，而 `add user 123 event=on` 这种自然写法里
+    # `event=on` 会被当成位置参数填进 message 位（报"必须为布尔值"）。
+    # 自己解析就能同时接受 `event=on` / `--event=on` / `event:on`。
+    switches = VariadicField(
+        description="[message=on|off] [event=on|off]（省略 = 通知开/活动关）")
+
+
+class SetTargetSchema(CommandSchema):
+    """只改开关，不动绑定本身（没给的开关保持不变）。"""
+
+    kind = ChoiceField(["group", "user"], default="group",
+                       description="目标类型：group=群 / user=QQ用户")
+    target = QQField(required=False,
+                     description="群号或 QQ 号；群聊中省略则用当前群")
+    # 没给的开关保持原值（解析层只处理出现过的键）
+    switches = VariadicField(description="[message=on|off] [event=on|off]（省略=不改）")
+
+
+class DektokenSchema(CommandSchema):
+    """给某个绑定设置第二课堂 JWT。
+
+    参数用 variadic 收口：`user` 只需要 JWT，`group` 还需要群号，
+    固定位置参数没法同时满足两种形态（{{token, group_id}} 顺序会冲突）。
+    """
+
+    kind = ChoiceField(["user", "group"], default="user",
+                       description="user=设置自己的 token / group=设置某个群的 token")
+    rest = VariadicField(description="user: <JWT>；group: <群号> <JWT>")
 
 
 class DelTargetSchema(CommandSchema):
@@ -20,17 +55,6 @@ class DelTargetSchema(CommandSchema):
                        description="目标类型：group=群 / user=QQ用户")
     target = QQField(required=False,
                      description="群号或 QQ 号；群聊中省略则用当前群")
-
-
-class BindSchema(CommandSchema):
-    """管理「私聊可用范围」白名单（判定逻辑见 main.py 的 check_access）。"""
-
-    kind = ChoiceField(["user", "group"], default="user",
-                       description="user=私聊白名单用户 / group=允许小窗的群")
-    target = QQField(required=False,
-                     description="QQ 号或群号；省略则只列白名单（不改动）")
-    action = ChoiceField(["add", "del", "list"], default="add",
-                         description="add=加入白名单 / del=移出 / list=只看不改")
 
 
 class IntervalSchema(CommandSchema):
@@ -55,6 +79,9 @@ class GetSchema(CommandSchema):
 class ListSchema(CommandSchema):
     page = IntField(default=1, min=1, max=100000,
                     description="页码，从 1 开始（最新在前）")
+    scope = ChoiceField(["notices", "acts", "all"], default="notices",
+                        description="notices=置顶+通知（默认）/ acts=只看第二课堂活动"
+                                    " / all=两者都看。也可用 `-a` 简写看活动")
 
 
 class ImagesSchema(CommandSchema):
