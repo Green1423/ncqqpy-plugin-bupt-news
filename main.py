@@ -965,11 +965,15 @@ class BuptNewsPlugin(PluginBase):
             # 第二课堂与通知是两条独立链路：通知失败不该拖累活动，
             # 活动失败也不该让整轮同步算失败（各自内部吞异常并记日志）。
             # preview 是"只发给自己看通知"，不该顺带把活动推给群。
-            # 活动**按自己的随机间隔**刷新（10–60 分钟），不跟着通知的每轮跑；
-            # 手动 `/buptnews sync` 视为"现在就看"，强制刷一次。
-            if preview_user is None and (force_acts or self._activity_due()):
-                await self._sync_activities()
-                if getattr(self, "_act_bindings", None):
+            # 活动**按自己的随机间隔**刷新（10–60 分钟），不跟着通知的每轮跑。
+            if preview_user is None and self._act_bindings:
+                if self._in_quiet_hours():
+                    # 免打扰时段**连访问都不做**（不只是不推送）：
+                    # 半夜还在定时打第二课堂接口，本身就是异常行为。
+                    # 也不推进 `acts_next_at` —— 醒来后第一轮就会立刻补上。
+                    self._log_quiet_skip()
+                elif force_acts or self._activity_due():
+                    await self._sync_activities()
                     self._schedule_next_activity()
             return result
         except PortalAuthError as e:
@@ -1450,6 +1454,17 @@ class BuptNewsPlugin(PluginBase):
             lines.append(f"{prefix}{rec.get('id')} {date} {title}".rstrip())
         return lines
 
+    def _log_quiet_skip(self) -> None:
+        """免打扰时段跳过活动拉取时的日志（每小时最多一条，别刷屏）。"""
+        now = time.time()
+        if now - float(getattr(self, "_quiet_acts_log_at", 0.0) or 0.0) < 3600:
+            return
+        self._quiet_acts_log_at = now
+        start, end = self._quiet_window()
+        self.logger.info(
+            "[bupt_news] 免打扰时段（%s-%s）：第二课堂**不访问**，醒来后自动补拉",
+            start.strftime("%H:%M"), end.strftime("%H:%M"))
+
     def _activity_due(self, now: float | None = None) -> bool:
         """活动这一轮该不该刷新（间隔在 `interval_min`~`interval_max` 之间随机）。"""
         if not getattr(self, "_act_bindings", None):
@@ -1501,7 +1516,9 @@ class BuptNewsPlugin(PluginBase):
             nxt = float(self._store.meta_get("acts_next_at") or 0)
         except (TypeError, ValueError):
             nxt = 0.0
-        if nxt > time.time():
+        if self._in_quiet_hours():
+            parts.append("免打扰中·不访问")
+        elif nxt > time.time():
             parts.append(f"下次刷新 {datetime.fromtimestamp(nxt):%H:%M}")
         expiries = [b["client"].expiry() for b in bindings
                     if callable(getattr(b["client"], "expiry", None))]
