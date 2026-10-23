@@ -5,7 +5,7 @@
 
 ## 1.1 插件目录
 
-```
+```text
 plugins/bupt_news/
 ├── __init__.py     # 导出 BuptNewsPlugin（框架按此发现插件）
 ├── main.py         # 插件主体：定时同步、免打扰/早报编排、推送、命令注册

@@ -33,7 +33,7 @@
 
 ## 3.2 凭据优先级
 
-```
+```text
 门户：  环境变量 BUPT_PORTAL_USERNAME / BUPT_PORTAL_PASSWORD   >   config.json
 摘要：  环境变量 DEEPSEEK_API_KEY                              >   summarize.api_key
 ```

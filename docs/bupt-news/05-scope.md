@@ -15,7 +15,7 @@
 > `scope` 只管「在私聊还是群里」，**不回答「这个私聊能不能用」** —— 后者是 (04-commands.md#42-私聊可用范围binding-两道闸门别混为一谈) 的
 > `binding`（服务范围），判定发生在权限校验**之前**。
 
-框架在 `CommandManager.handle()` 里**按实际执行的那条命令（子命令优先）**判定：
+权限按**实际执行的那条命令（子命令优先）**判定：
 
 ```python
 if not effective.allows_context(is_group):      return ("_not_found", cmd)
@@ -25,14 +25,14 @@ if self.scope == "private" and is_group:     return False
 if self.scope == "group"   and not is_group: return False
 ```
 
-> `handle()` 先解析「实际执行的 handler」（子命令优先）再按它自己的 `scope`/`permission`
+> 执行时先解析「实际执行的命令」（子命令优先），再按它自己的 `scope`/`permission`
 > 校验，`/help` 用同一条 `allows_context()` 判定，两者不会分叉（见 (../../guide/06-commands.md#65-子命令)）。
 > 例外：**带子命令的命令组本体不校验权限**（权限属于子命令），但本体的 `scope` 仍然生效。
 
 ## 5.2 真正决定「机器人听哪个群」的是 `bound_groups`
 
 ⚠️ 真正卡住群聊的是**框架入口的事件过滤**，比 `scope` 严格得多。
-`napcat/client.py` 的 `_on_ws_event()`：
+框架的事件入口：
 
 ```python
 if (event.message_type == "group"

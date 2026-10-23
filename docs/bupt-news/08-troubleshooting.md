@@ -177,7 +177,7 @@ asyncio.run(m())"
 
 失败时的日志（便于确认到底为什么失败）既有每次尝试的告警，也有最终结论：
 
-```
+```text
 [bupt_news] AI 摘要失败（同步，3/10 条缺失，第 1/6 次）：HTTP 429: rate limited；2.0s 后重试
 [bupt_news] AI 摘要重试 6 次仍失败（同步，10 条）：HTTP 429: rate limited；本轮不写降级摘要，下次同步/调取时再试
 ```
