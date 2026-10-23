@@ -2681,7 +2681,7 @@ class BuptNewsPlugin(PluginBase):
             if kind == "img":
                 path = await self._images.ensure(val) if images_ready else None
                 if path:
-                    # 用 file:// 引用本地缓存文件（OneBot 本地图片写法，见 docs/usage.md）
+                    # 用 file:// 引用本地缓存文件（OneBot 本地图片写法，见 docs/guide/03-messages.md）
                     chain.text("\n").image(file=Path(path).as_uri(),
                                            name=os.path.basename(path))
                     body_started = True

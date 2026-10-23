@@ -115,7 +115,7 @@ git clone https://github.com/Green1423/ncqqpy-plugin-bupt-news plugins/bupt_news
 | `DEEPSEEK_API_KEY` | AI 摘要的 key（也可写进 `summarize.api_key`） |
 
 
-详细文档：[`docs/bupt-news.md`](docs/bupt-news.md)。
+详细文档：[`docs/bupt-news/README.md`](docs/bupt-news/README.md)。
 ## 测试
 
 ```bash
