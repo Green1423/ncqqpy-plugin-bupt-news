@@ -287,6 +287,9 @@ AFTERCLASS_DEFAULTS = {
     # 实际每次在 [min, max] 之间取随机值，避免固定周期被识别成机器人。
     "interval_min": 600,
     "interval_max": 3600,
+    # 拉取失败后的重试间隔（秒）：网络/DNS 抖动时别按 10–60 分钟干等，
+    # 否则接口窗口里的活动会在两次成功之间上架又下架（真实漏过）。
+    "interval_retry": 300,
     "max_records": 300,        # 每个绑定本地保留多少条活动记录
     # **独立绑定**：每个推送目标（一个群或一个用户）**各自一份 JWT**。
     # 第二课堂的活动列表是按账号（学院/年级/角色）算的，不同账号看到的活动不同，
@@ -973,8 +976,8 @@ class BuptNewsPlugin(PluginBase):
                     # 也不推进 `acts_next_at` —— 醒来后第一轮就会立刻补上。
                     self._log_quiet_skip()
                 elif force_acts or self._activity_due():
-                    await self._sync_activities()
-                    self._schedule_next_activity()
+                    _fresh, _sent, ok = await self._sync_activities()
+                    self._schedule_next_activity(ok=ok)
             return result
         except PortalAuthError as e:
             self.logger.error("[bupt_news] 门户认证失败：%s", e)
@@ -1426,28 +1429,65 @@ class BuptNewsPlugin(PluginBase):
         os.replace(tmp, path)
         return path
 
-    def _activity_list_lines(self, size: int) -> list[str]:
-        """`list --scope=acts|all` 的活动区：各绑定的活动按时间倒序合并。
+    @staticmethod
+    def _activity_when(rec: dict) -> str:
+        """活动的时间（开始时间优先，退而取报名截止）；格式 `YYYY-MM-DD HH:MM`。
 
-        与通知的 `#编号` 分页无关（活动是外部 id），只显示最新 `size` 条并说明截断。
+        这种格式**字符串比较即时间比较**，所以排序不必解析时间戳。
+        """
+        return str(rec.get("start") or rec.get("apply_end") or "")
+
+    @classmethod
+    def _sort_activities(cls, recs: list[dict], now: str | None = None) -> list[dict]:
+        """按**活动时间**排序，而不是按"我们什么时候拉到它"。
+
+        顺序：即将开始的（**升序**，最近的在前）→ 已结束的（降序，刚过去的在前）
+        → 没有时间的（按入库时间降序）。之前按 `ts`（入库时间）排，
+        表现就是"顺序看起来随机的"——因为活动是批量拉到的，入库顺序等于接口顺序。
+        """
+        now = now or datetime.now().strftime("%Y-%m-%d %H:%M")
+        upcoming: list[dict] = []
+        past: list[dict] = []
+        unknown: list[dict] = []
+        for rec in recs:
+            when = cls._activity_when(rec)
+            if not when:
+                unknown.append(rec)
+            elif when >= now:
+                upcoming.append(rec)
+            else:
+                past.append(rec)
+        upcoming.sort(key=cls._activity_when)
+        past.sort(key=cls._activity_when, reverse=True)
+        unknown.sort(key=lambda r: float(r.get("ts") or 0), reverse=True)
+        return upcoming + past + unknown
+
+    def _activity_list_lines(self, size: int) -> list[str]:
+        """`list --scope=acts|all` 的活动区：各绑定的活动**按活动时间**合并排序。
+
+        与通知的 `#编号` 分页无关（活动是外部 id），只显示前 `size` 条并说明截断。
+        排序规则见 `_sort_activities`（即将开始的在前，其次刚结束的，最后没有时间的）。
         """
         bindings = getattr(self, "_act_bindings", []) or []
         if not bindings:
             return ["🎪 第二课堂：未配置绑定（用 add group|user <号> event=on）"]
-        rows: list[tuple[float, str, dict]] = []
+        rows: list[tuple[str, dict]] = []
         for b in bindings:
             for rec in b["store"].all_records():
-                rows.append((float(rec.get("ts") or 0), b["name"], rec))
+                rows.append((b["name"], rec))
         if not rows:
             return ["🎪 第二课堂：暂无活动记录（等下次同步）"]
-        rows.sort(key=lambda r: r[0], reverse=True)
+        # ⚠️ 按**活动时间**排，不是按入库时间（见 `_sort_activities` 的说明）
+        order = {id(r): i for i, r in enumerate(
+            self._sort_activities([rec for _b, rec in rows]))}
+        rows.sort(key=lambda r: order[id(r[1])])
         total = len(rows)
         shown = rows[:size]
         multi = len(bindings) > 1
         head = f"🎪 第二课堂（{len(bindings)} 个绑定 · 共 {total} 条"
         head += f"，仅显示最新 {len(shown)} 条）" if total > len(shown) else "）"
         lines = [head]
-        for _ts, name, rec in shown:
+        for name, rec in shown:
             prefix = f"[{name}] " if multi else ""
             date = str(rec.get("start") or rec.get("apply_end") or "")[5:16]
             title = str(rec.get("title") or "（无标题）")[:26]
@@ -1476,7 +1516,8 @@ class BuptNewsPlugin(PluginBase):
             nxt = 0.0
         return now >= nxt
 
-    def _schedule_next_activity(self, now: float | None = None) -> float:
+    def _schedule_next_activity(self, now: float | None = None,
+                                *, ok: bool = True) -> float:
         """安排下一次活动刷新（随机抖动），落盘到 state.json 的 meta。
 
         为什么随机：固定 10 分钟整点刷新是最容易被判定为机器人的特征之一；
@@ -1486,10 +1527,15 @@ class BuptNewsPlugin(PluginBase):
         try:
             lo = max(60, int(ac.get("interval_min", 600) or 600))
             hi = max(lo, int(ac.get("interval_max", 3600) or 3600))
+            retry = max(60, int(ac.get("interval_retry", 300) or 300))
         except (TypeError, ValueError):
-            lo, hi = 600, 3600
+            lo, hi, retry = 600, 3600, 300
         base = time.time() if now is None else now
-        nxt = base + random.uniform(lo, hi)
+        if not ok:
+            # 失败了就用**短间隔**重试，别按 10–60 分钟等 —— 等得越久越容易漏活动
+            nxt = base + min(retry, lo)
+        else:
+            nxt = base + random.uniform(lo, hi)
         try:
             self._store.meta_set("acts_next_at", nxt)
         except Exception as e:  # noqa: BLE001 - 落盘失败不该影响同步
@@ -1527,30 +1573,38 @@ class BuptNewsPlugin(PluginBase):
             parts.append(f"token 最近至 {min(expiries):%Y-%m-%d}")
         return "🎪 第二课堂：" + " / ".join(parts)
 
-    async def _sync_activities(self) -> tuple[int, int]:
-        """按绑定逐个拉活动并推送，返回 `(新活动总数, 成功发送的目标数)`。
+    async def _sync_activities(self) -> tuple[int, int, bool]:
+        """按绑定逐个拉活动并推送，返回 `(新活动总数, 成功目标数, 是否全部正常)`。
 
-        每个绑定是**独立的账号 + 独立的目标**：一个绑定失败（token 过期、网络抖动）
-        只跳过它自己，不影响其它绑定，也不影响通知同步。
+        第三个返回值专给调度用：**有绑定失败时不能按正常间隔排下一次**，
+        否则一次网络抖动就会白等 10–60 分钟（真实踩过：DNS 挂了一整天，
+        期间上架又下架的活动全漏了）。
         """
         bindings = getattr(self, "_act_bindings", []) or []
         if not bindings:
-            return (0, 0)
+            return (0, 0, True)
         await self._warn_token_expiry()
         fresh_total = sent_total = 0
+        all_ok = True
         for binding in bindings:
             try:
-                fresh, sent = await self._sync_one_binding(binding)
+                fresh, sent, ok = await self._sync_one_binding(binding)
             except Exception as e:  # noqa: BLE001 - 单绑定失败不能拖垮全局
                 self.logger.warning("[bupt_news] 第二课堂绑定「%s」同步失败：%s",
                                     binding.get("name"), e)
+                all_ok = False
                 continue
             fresh_total += fresh
             sent_total += sent
-        return (fresh_total, sent_total)
+            all_ok = all_ok and ok
+        return (fresh_total, sent_total, all_ok)
 
-    async def _sync_one_binding(self, binding: dict) -> tuple[int, int]:
-        """同步**一个**绑定：拉该账号可见的活动，推给它自己的目标。"""
+    async def _sync_one_binding(self, binding: dict) -> tuple[int, int, bool]:
+        """同步**一个**绑定：拉该账号可见的活动，推给它自己的目标。
+
+        返回 `(新增数, 成功发送数, ok)`。`ok=False` 表示这轮**该重试**
+        （网络/DNS/发送失败）；token 失效之类重试也没用的不算失败。
+        """
         client = binding["client"]
         store = binding["store"]
         name = binding["name"]
@@ -1567,7 +1621,7 @@ class BuptNewsPlugin(PluginBase):
                 self.logger.warning("[bupt_news] 绑定「%s」重读 token 失败：%s",
                                     name, e)
         if not getattr(client, "available", False):
-            return (0, 0)
+            return (0, 0, True)      # 缺 token：重试也没用，按正常节奏等它补上
 
         try:
             me = await client.me()
@@ -1575,7 +1629,7 @@ class BuptNewsPlugin(PluginBase):
             self.logger.warning(
                 "[bupt_news] 绑定「%s」的 token 已失效，跳过（新 JWT 写入 %s 即恢复）",
                 name, binding["token_file"])
-            return (0, 0)
+            return (0, 0, True)
 
         user = me.get("user") or {}
         try:
@@ -1588,10 +1642,12 @@ class BuptNewsPlugin(PluginBase):
             )
         except DektAuthError:
             self.logger.warning("[bupt_news] 绑定「%s」的 token 失效，跳过", name)
-            return (0, 0)
+            return (0, 0, True)
         except Exception as e:  # noqa: BLE001
-            self.logger.warning("[bupt_news] 绑定「%s」拉活动失败：%s", name, e)
-            return (0, 0)
+            # 网络/DNS/超时：**这轮算失败**，让调度早点重试（见 `_schedule_next_activity`）
+            self.logger.warning("[bupt_news] 绑定「%s」拉活动失败（稍后重试）：%s",
+                                name, e)
+            return (0, 0, False)
 
         classes: dict[str, str] = {}
         try:
@@ -1612,24 +1668,26 @@ class BuptNewsPlugin(PluginBase):
             store.mark_pushed([r.get("id") for r in fresh])
             self.logger.info("[bupt_news] 绑定「%s」首轮建立基线，不推送（%d 条）",
                              name, len(fresh))
-            return (len(fresh), 0)
+            return (len(fresh), 0, True)
 
         backlog = store.backlog()
         if not backlog:
-            return (len(fresh), 0)
+            return (len(fresh), 0, True)
         if self._in_quiet_hours():
             self.logger.info(
                 "[bupt_news] 处于免打扰时段，绑定「%s」有 %d 条活动已入库待补发",
                 name, len(backlog))
-            return (len(fresh), 0)
+            return (len(fresh), 0, True)
 
         cap = max(1, int((self.config.get("afterclass") or {})
                          .get("max_per_round", 5) or 5))
-        batch = backlog[-cap:] if len(backlog) > cap else backlog
-        if len(backlog) > cap:
+        # 按**活动时间**挑最靠前的几条并按时间展示（不是按"先后拉到"）
+        ordered = self._sort_activities(backlog)
+        batch = ordered[:cap]
+        if len(ordered) > cap:
             self.logger.info(
-                "[bupt_news] 绑定「%s」待推 %d 条超出单轮上限 %d，仅推送最新 %d 条",
-                name, len(backlog), cap, cap)
+                "[bupt_news] 绑定「%s」待推活动 %d 条超出单轮上限 %d，"
+                "按活动时间取最早的 %d 条", name, len(ordered), cap, cap)
 
         head = f"🎪 第二课堂新活动（{len(batch)}）"
         body = "\n\n".join(format_activity(r) for r in batch)
@@ -1637,13 +1695,13 @@ class BuptNewsPlugin(PluginBase):
             sent = await self._send_to_binding(
                 binding, MessageChain().text(f"{head}\n\n{body}"))
         except Exception as e:  # noqa: BLE001 - 发送失败保留积压，下轮重试
-            self.logger.error("[bupt_news] 绑定「%s」推送失败：%s", name, e)
-            return (len(fresh), 0)
+            self.logger.error("[bupt_news] 绑定「%s」推送失败（稍后重试）：%s", name, e)
+            return (len(fresh), 0, False)
         if sent:
             store.mark_pushed([r.get("id") for r in batch])
             self.logger.info("[bupt_news] 绑定「%s」已推送 %d 条活动", name,
                              len(batch))
-        return (len(fresh), sent)
+        return (len(fresh), sent, True)
 
     def _backlog_records(self) -> list[dict]:
         """已落库但尚未推送的记录，按 id 升序（旧 → 新）。

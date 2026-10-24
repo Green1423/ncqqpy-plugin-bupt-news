@@ -76,6 +76,7 @@ git clone https://github.com/Green1423/ncqqpy-plugin-bupt-news plugins/bupt_news
     "max_per_round": 5,
     "interval_min": 600,
     "interval_max": 3600,
+    "interval_retry": 300,
     "max_records": 300,
     "bindings": []
   },
