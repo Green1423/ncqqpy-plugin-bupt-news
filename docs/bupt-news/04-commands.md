@@ -129,35 +129,41 @@
 
 ## 4.5 给 AI 的技能（`ai_chat` 技能通道）
 
-命令是给**人**用的，技能是给**模型**用的。本插件通过框架的技能通道
-（`@self.register_skill(...)`，见[技能](https://github.com/Green1423/ncqqpy/blob/main/docs/plugin-dev/17-skills.md)）把**只读**能力
-交给 `ai_chat`，模型可以在对话里自己调用：
+命令是给**人**用的，技能是给**模型**用的。本插件不另写 handler ——
+**技能就是命令映射**：
 
-| 技能 | 能力 | 谁能用 |
-|------|------|--------|
-| `bupt_news.search` | 在本地通知库检索（标题/摘要/正文/单位），返回编号+日期+摘要 | 服务范围内（同命令白名单） |
-| `bupt_news.recent` | 最近入库的通知（新→旧） | 同上 |
-| `bupt_news.notice` | 按编号取详情（部门/日期/摘要/正文摘录/原文链接） | 同上 |
-| `bupt_news.activities` | 已同步的第二课堂活动（按活动时间） | **仅超级用户** |
+```python
+self.register_skill("notice", command="buptnews.get")
+```
 
-几条设计取舍：
+参数 schema、说明、权限、作用域全部**从命令自己取**（`CommandSchema`），触发时走
+`CommandManager.handle()`，与用户手敲完全同一条路径 —— **AI 这条路绕不过权限**。
+命令自己回消息，AI 不接话、也不转述它的输出。
 
-- **只读**：推送目标、token、置顶这些有副作用或涉及权限的，仍然只走命令；
-- **技能自己回消息**（2026-10-25 起的规范）：用户说人话 → AI 转成技能调用 →
-  **插件用 `await ctx.send(全文)` 直接回话**，`return` 只给模型一句短确认
-  （「已把 N 条命中发给用户」）。AI **不转述**技能输出 —— 把整篇塞进返回值会让
-  用户看到两遍；
-- **权限在技能里自己判**：框架不替技能判权限。通知类按 `check_access` 的同一套判据
-  重算（群聊看群号、私聊看 QQ 号、超管豁免）；`activities` 的数据来自某个同学的
-  绑定账号，属于个人数据，只给超管。拒绝时**不发消息**、只把原因返回给模型，
-  由它用自己的话解释；
-- **没有 `ctx.send` 时退化**：测试/独立调用没有回话通道，这时返回全文（否则什么都看不到）；
-- **异常不吞**：抛出去由 `ai_chat` 变成「技能执行失败」交给模型，它才知道要换个问法。
+| 技能 | 映射命令 | 能力 |
+|------|----------|------|
+| `bupt_news.search` | `/buptnews search <关键词>` | 搜索通知（本地库 + 信息门户，返回编号/E 编号） |
+| `bupt_news.recent` | `/buptnews list [页码] [--scope=…]` | 置顶 + 最近通知；`scope=acts` 看第二课堂活动 |
+| `bupt_news.notice` | `/buptnews get <编号\|E编号\|P编号\|链接>` | 按任意编号形式取详情 |
+| `bupt_news.pins` | `/buptnews pin` | 看置顶清单（`P1…Pn` + 概要） |
+| `bupt_news.status` | `/buptnews status` | 同步状态（超管） |
+
+几条取舍：
+
+- **只挂只读命令**。写操作（`add`/`set`/`del`/`dektoken`/`on`/`off`/`interval`）、
+  触发抓取（`sync`）、下载重活（`images`）继续只由人来敲 —— 模型能调用的面越小，
+  被误触发的代价越低。`dektoken` 尤其**绝不能**挂：它能写 token。
+- **活动不需要单独的技能**：`recent`（= `list`）的 `scope` 参数传 `acts` 即可，
+  省一个技能名，也少一份要同步的描述。
+- **权限由命令系统判定**：`status`/`pins` 需要超管，普通用户触发拿到的是与手敲一致的
+  「未知命令」口径；`search`/`notice` 是 `scope=private`，群里触发同样不可用。
+- **改命令等于改技能**：命令的参数、说明、权限一改，模型看到的工具定义就跟着变，
+  不存在"技能描述过期"这种漂移。
 
 在 `ai_chat` 侧可以整体关闭或按名单收窄：
 
 ```json
-"skills": {"enabled": true, "allow": [], "deny": ["bupt_news.activities"]}
+"skills": {"enabled": true, "allow": [], "deny": ["bupt_news.status"]}
 ```
 
 ## 4.6 消息排版约定（所有面向用户的消息）

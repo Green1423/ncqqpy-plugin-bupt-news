@@ -565,17 +565,30 @@ class BuptNewsPlugin(PluginBase):
         self._register_commands()
         # 技能通道（`napcat.skills`）：把只读能力交给 ai_chat 的模型调用。
         # 框架没有这个能力时不能崩 —— 命令是主功能，技能没有只是没有。
-        if hasattr(self, "register_skill"):
+        # 技能 = **命令映射**（见 `napcat.skills`）：参数 schema 与说明都从命令
+        # 自己取，触发时走 `CommandManager.handle()`，权限/作用域/白名单与
+        # 用户手敲完全一致。这里只写「哪条命令挂给 AI」。
+        # 只挂**确实存在**的命令。技能名保持与「查通知」语义一致：
+        # `recent` → `buptnews.list`（置顶 + 最近通知的分页清单），
+        # 这样模型侧工具名是 `bupt_news_recent`（与旧版一致，别让用户和模型
+        # 都得重新记名字）。
+        # `buptnews.search` 只允许私聊（scope=private），群里触发会被命令系统拒掉。
+        # 只挂**只读**命令：写操作（add/set/del/dektoken/on/off/interval）、
+        # 触发抓取（sync）、下载重活（images）继续只由人来敲 —— 模型能调用的
+        # 面越小，被误触发的代价越低。`dektoken` 尤其**绝不能**挂：它是写 token 的。
+        # 活动不需要单独的技能：`recent`（=list）的 `scope` 参数传 `acts` 即可。
+        for skill_name, command in (
+            ("search", "buptnews.search"),
+            ("recent", "buptnews.list"),
+            ("notice", "buptnews.get"),
+            ("pins", "buptnews.pin"),
+            ("status", "buptnews.status"),
+        ):
             try:
-                from .skills import register as register_skills
-                n = register_skills(self)
-                self.logger.info("[bupt_news] 已注册 %d 个 ai_chat 技能", n)
+                self.register_skill(skill_name, command=command)
             except Exception as e:  # noqa: BLE001 - 技能失败不该影响插件启用
-                self.logger.warning("[bupt_news] 注册 ai_chat 技能失败：%s", e)
-        else:
-            self.logger.warning(
-                "[bupt_news] 当前进程里的框架没有 register_skill：技能暂不注册"
-                "（命令不受影响），重启进程后生效")
+                self.logger.warning("[bupt_news] 注册技能 %s 失败：%s",
+                                    command, e)
         self._schedule_sync()
 
         if self._summarizer is not None and not self._summarizer.enabled:
@@ -2595,6 +2608,95 @@ class BuptNewsPlugin(PluginBase):
             head = f"{_NOT_STUDENT_HINT}\n{head}"
         return MessageChain().text(head + "\n" + "\n".join(lines))
 
+    async def _load_reference(self, raw: str) -> tuple[dict | None, str, str]:
+        """把用户/模型给的一个"引用"解析成通知记录：`(记录, 前缀, 错误)`。
+
+        支持四种引用（`/buptnews get` 与 ai_chat 的 `notice` 技能共用**这一个**入口，
+        免得两处解析规则漂移）：
+
+        * `476`           —— 本地短编号
+        * `E1759-142679`  —— 门户结果编号（自带 treeid/newsid，不依赖缓存就能取）
+        * `P2`            —— 置顶编号
+        * `http://…`      —— 原文链接
+
+        只要 `err` 非空就原样回给调用方（两边的文案本来就是给人看的）。
+        """
+        raw = str(raw or "").strip()
+        # 先按置顶编号查（P 前缀没有别的编号空间用，不会撞车）
+        pin_entry = self._store.pin_entry(raw) if raw[:1].upper() == "P" else None
+        if pin_entry:
+            if pin_entry.get("ext"):
+                notice = dict(pin_entry.get("notice") or {})
+                # 置顶时摘要可能没拿到（AI 暂时不可用）→ 这次调取再试一次
+                notice = await self._summarize_external(notice)
+                return (notice, f"P{pin_entry['n']} {pin_entry['ext']} ", "")
+            nid = pin_entry.get("id")
+            rec = self._store.get_notice(nid)
+            if not rec:
+                return (None, "",
+                        f"❓ 置顶 P{pin_entry['n']} 的通知已超出保留范围")
+            return (rec, f"P{pin_entry['n']} ", "")
+
+        if is_external_code(raw):
+            # 编号自带链接 → 不依赖任何缓存就能抓取；有缓存元数据则先拿来用
+            url = external_url(raw)
+            cached = self._store.external_get(raw) or {}
+            if self._portal is None:
+                return (None, "", "门户客户端未就绪，稍后再试")
+            try:
+                d = await self._portal.fetch_detail(url)
+            except PortalAuthError:
+                return (None, "", "❌ 门户会话失效，稍后再试")
+            except Exception as e:  # noqa: BLE001
+                return (None, "", f"❌ 打开 {raw} 失败：{type(e).__name__}: {e}")
+            rec = {
+                "title": d.get("title") or cached.get("title") or "（无标题）",
+                "dept": d.get("dept") or cached.get("dept") or "",
+                "date": d.get("date") or cached.get("date") or "",
+                "body": d.get("body") or "", "url": url,
+                "images": d.get("images") or [],
+                "tables": d.get("tables") or [],
+                "external_id": raw,
+                # 门户临时记录没有"是否给学生"的 AI 判定 → 按学生处理（不误标）
+                "student_ai": False,
+            }
+            # E 编号来自门户：正文到手后补一条 AI 摘要（与置顶时同一条路径）
+            rec = await self._summarize_external(rec)
+            return (rec, f"🔗 {raw} ", "")
+
+        if raw.lower().startswith(("http://", "https://")):
+            if self._portal is None:
+                return (None, "", "门户客户端未就绪，稍后再试")
+            try:
+                d = await self._portal.fetch_detail(raw)
+            except PortalAuthError:
+                return (None, "", "❌ 门户会话失效，稍后再试")
+            except Exception as e:  # noqa: BLE001
+                return (None, "", f"❌ 打开链接失败：{type(e).__name__}: {e}")
+            rec = {
+                "title": d.get("title") or "（无标题）",
+                "dept": d.get("dept") or "", "date": d.get("date") or "",
+                "body": d.get("body") or "", "url": raw,
+                "images": d.get("images") or [], "tables": d.get("tables") or [],
+                "student_ai": False,
+            }
+            return (rec, "🔗 ", "")
+
+        try:
+            nid = int(raw)
+        except (TypeError, ValueError):
+            return (None, "",
+                    "❓ 请给编号或链接：/buptnews get <编号|E编号|P置顶编号|链接>\n"
+                    "💡 E 编号来自 /buptnews search 的门户结果")
+        rec = self._store.get_notice(nid)
+        if not rec:
+            return (None, "",
+                    f"❓ 未找到 {nid}"
+                    f"（仅保留最近 {self.config.get('notice_retention', 500)} 条）\n"
+                    "💡 /buptnews list 看可查询编号 · "
+                    "/buptnews search <关键词> 搜门户")
+        return (rec, f"#{nid} ", "")
+
     async def _render_notice(self, rec: dict, *, prefix: str = "",
                              retry_summary: bool = True) -> list:
         """把一条通知渲染成消息（本地记录与门户临时记录共用）。
@@ -3334,85 +3436,10 @@ class BuptNewsPlugin(PluginBase):
              description="按编号查看通知全文（本地编号 / E编号 / P置顶编号 / 链接）")
         async def cmd_get(params, event):
             raw = str(getattr(params, "id", "") or "").strip()
-            # 支持四种引用：
-            #   476                     本地编号
-            #   E1759-142679            门户结果编号（**自带** treeid/newsid，可直接还原链接）
-            #   P2                      置顶编号
-            #   http://…                原文链接
-            # 先按置顶编号查（P2），因为没有别的空间用 P 前缀，不会撞车。
-            pin_entry = self._store.pin_entry(raw) if raw[:1].upper() == "P" else None
-            if pin_entry:
-                if pin_entry.get("ext"):
-                    notice = dict(pin_entry.get("notice") or {})
-                    # 置顶时摘要可能没拿到（AI 暂时不可用）→ 这次调取再试一次
-                    notice = await self._summarize_external(notice)
-                    return await self._render_notice(
-                        notice, prefix=f"P{pin_entry['n']} {pin_entry['ext']} ")
-                nid = pin_entry.get("id")
-                rec = self._store.get_notice(nid)
-                if not rec:
-                    return f"❓ 置顶 P{pin_entry['n']} 的通知已超出保留范围"
-                return await self._render_notice(
-                    rec, prefix=f"P{pin_entry['n']} ")
-
-            if is_external_code(raw):
-                # 编号自带链接 → 不依赖任何缓存就能抓取；有缓存元数据则先拿来用
-                url = external_url(raw)
-                cached = self._store.external_get(raw) or {}
-                if self._portal is None:
-                    return "门户客户端未就绪，稍后再试"
-                try:
-                    d = await self._portal.fetch_detail(url)
-                except PortalAuthError:
-                    return "❌ 门户会话失效，稍后再试"
-                except Exception as e:  # noqa: BLE001
-                    return f"❌ 打开 {raw} 失败：{type(e).__name__}: {e}"
-                rec = {
-                    "title": d.get("title") or cached.get("title") or "（无标题）",
-                    "dept": d.get("dept") or cached.get("dept") or "",
-                    "date": d.get("date") or cached.get("date") or "",
-                    "body": d.get("body") or "", "url": url,
-                    "images": d.get("images") or [],
-                    "tables": d.get("tables") or [],
-                    "external_id": raw,
-                    # 门户临时记录没有"是否给学生"的 AI 判定 → 按学生处理（不误标）
-                    "student_ai": False,
-                }
-                # E 编号来自门户：正文到手后补一条 AI 摘要（与置顶时同一条路径）
-                rec = await self._summarize_external(rec)
-                return await self._render_notice(rec, prefix=f"🔗 {raw} ")
-
-            if raw.lower().startswith(("http://", "https://")):
-                if self._portal is None:
-                    return "门户客户端未就绪，稍后再试"
-                try:
-                    d = await self._portal.fetch_detail(raw)
-                except PortalAuthError:
-                    return "❌ 门户会话失效，稍后再试"
-                except Exception as e:  # noqa: BLE001
-                    return f"❌ 打开链接失败：{type(e).__name__}: {e}"
-                rec = {
-                    "title": d.get("title") or "（无标题）",
-                    "dept": d.get("dept") or "", "date": d.get("date") or "",
-                    "body": d.get("body") or "", "url": raw,
-                    "images": d.get("images") or [], "tables": d.get("tables") or [],
-                    "student_ai": False,
-                }
-                return await self._render_notice(rec, prefix="🔗 ")
-
-            try:
-                nid = int(raw)
-            except (TypeError, ValueError):
-                return ("❓ 请给编号或链接：/buptnews get <编号|E编号|P置顶编号|链接>\n"
-                        "💡 E 编号来自 /buptnews search 的门户结果")
-            rec = self._store.get_notice(nid)
-            if not rec:
-                return (f"❓ 未找到 {nid}"
-                        f"（仅保留最近 {self.config.get('notice_retention', 500)} 条）\n"
-                        "💡 /buptnews list 看可查询编号 · "
-                        "/buptnews search <关键词> 搜门户")
-            return await self._render_notice(rec, prefix=f"#{nid} ")
-
+            rec, prefix, err = await self._load_reference(raw)
+            if err:
+                return err
+            return await self._render_notice(rec, prefix=prefix)
 
         @reg("buptnews.images", permission="superuser", scope="private",
              schema=ImagesSchema, description="图片缓存：统计 / 补齐历史图片")
