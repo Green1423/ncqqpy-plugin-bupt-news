@@ -5,6 +5,12 @@ AI 光凭自己的知识答不了 —— 它需要**这个插件的数据源**�
 不用用户先敲 `/buptnews search` 再把结果贴给它。
 
 只给只读能力：推送目标、token、置顶这些有副作用或涉及权限的，继续留给命令。
+
+⚠️ **回话通道**（2026-10-25 起的规范）：技能是"用户说人话 → AI 转成指令 →
+插件自己执行并回复"，**AI 不转述技能输出**。所以每个技能都用 `await ctx.send(全文)`
+把结果直接发给用户，`return` 只给模型一句**短确认**（"已发送 N 条"）——
+把整篇塞进返回值会让模型再复述一遍，用户看到两遍。
+没有 `ctx.send` 时（测试、独立调用）退化成直接返回全文，便于断言。
 """
 from __future__ import annotations
 
@@ -15,6 +21,19 @@ from typing import Any
 BODY_MAX = 800
 #: 搜索结果里摘要的截断长度
 SUMMARY_MAX = 40
+
+
+async def _reply(ctx: Any, text: str, brief: str) -> str:
+    """把**全文**发给用户，返回值只给模型一句短确认。
+
+    `ctx.send` 是调用方（`ai_chat`）给的"回话"通道；它不存在时（测试/独立调用）
+    退化成返回全文，调用方自己决定怎么处理。
+    """
+    send = getattr(ctx, "send", None)
+    if callable(send):
+        await send(text)
+        return brief
+    return text
 
 
 def _brief(rec: dict) -> str:
@@ -56,7 +75,7 @@ def register(plugin) -> int:
         "search",
         description=("在「北邮校内通知」本地库里检索（标题/摘要/正文/单位）。"
                      "用户问「有没有关于某某的通知」「最近那个 xx 通知说了什么」时用它。"
-                     "返回若干条：编号、日期、摘要。要全文再用 notice 技能。"),
+                     "结果会直接发给用户（你不用复述）。要全文再用 notice 技能。"),
         parameters={
             "type": "object",
             "properties": {
@@ -84,7 +103,8 @@ def register(plugin) -> int:
         lines = [f"共 {total} 条命中，列出前 {len(hits)} 条："]
         lines += [_brief(r) for r in hits]
         lines.append("要看全文，用 notice 技能并传入编号（如 476）。")
-        return "\n".join(lines)
+        return await _reply(ctx, "\n".join(lines),
+                            f"已把 {len(hits)} 条命中发给用户（共 {total} 条）。")
 
     count += 1
 
@@ -115,7 +135,8 @@ def register(plugin) -> int:
             rec = plugin._store.get_notice(nid)
             if rec:
                 lines.append(_brief(rec))
-        return "\n".join(lines)
+        return await _reply(ctx, "\n".join(lines),
+                            f"已把最近 {len(ids)} 条通知发给用户。")
 
     count += 1
 
@@ -159,7 +180,8 @@ def register(plugin) -> int:
             parts.append("正文：\n" + body)
         if rec.get("url"):
             parts.append(f"原文：{rec['url']}")
-        return "\n".join(parts)
+        return await _reply(ctx, "\n".join(parts),
+                            f"已把通知 #{nid} 的详情发给用户。")
 
     count += 1
 
@@ -202,7 +224,8 @@ def register(plugin) -> int:
             when = plugin._activity_when(r) or "时间待定"
             place = f" · {r['place']}" if r.get("place") else ""
             lines.append(f"{r.get('id')} {when} {r.get('title') or '（无标题）'}{place}")
-        return "\n".join(lines)
+        return await _reply(ctx, "\n".join(lines),
+                            f"已把 {len(ordered)} 条活动发给用户。")
 
     count += 1
 
