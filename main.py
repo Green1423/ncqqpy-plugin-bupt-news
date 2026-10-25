@@ -563,6 +563,19 @@ class BuptNewsPlugin(PluginBase):
             self._build_activity_bindings(ac, warn=True)
 
         self._register_commands()
+        # 技能通道（`napcat.skills`）：把只读能力交给 ai_chat 的模型调用。
+        # 框架没有这个能力时不能崩 —— 命令是主功能，技能没有只是没有。
+        if hasattr(self, "register_skill"):
+            try:
+                from .skills import register as register_skills
+                n = register_skills(self)
+                self.logger.info("[bupt_news] 已注册 %d 个 ai_chat 技能", n)
+            except Exception as e:  # noqa: BLE001 - 技能失败不该影响插件启用
+                self.logger.warning("[bupt_news] 注册 ai_chat 技能失败：%s", e)
+        else:
+            self.logger.warning(
+                "[bupt_news] 当前进程里的框架没有 register_skill：技能暂不注册"
+                "（命令不受影响），重启进程后生效")
         self._schedule_sync()
 
         if self._summarizer is not None and not self._summarizer.enabled:
