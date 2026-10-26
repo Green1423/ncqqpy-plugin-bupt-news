@@ -577,15 +577,49 @@ class BuptNewsPlugin(PluginBase):
         # 触发抓取（sync）、下载重活（images）继续只由人来敲 —— 模型能调用的
         # 面越小，被误触发的代价越低。`dektoken` 尤其**绝不能**挂：它是写 token 的。
         # 活动不需要单独的技能：`recent`（=list）的 `scope` 参数传 `acts` 即可。
-        for skill_name, command in (
-            ("search", "buptnews.search"),
-            ("recent", "buptnews.list"),
-            ("notice", "buptnews.get"),
-            ("pins", "buptnews.pin"),
-            ("status", "buptnews.status"),
+        # 只挂**读**、且**语义不重叠**的三条：
+        #   search  = 按关键词找（私聊）
+        #   recent  = 列最近/置顶（全场景）
+        #   notice  = 按编号取**全文详情**
+        # 不挂 pin/status：`pin` 是管理动作（超管 + 写操作），而且它的
+        # 「不带参数列置顶」和 list 很像 —— 实测模型会拿它回答「p1 的详情」，
+        # 回来一串置顶清单（用户当场指出这是错的）。工具面越小、越不重叠，
+        # 选错的概率越低。
+        # 说明写成「**什么时候该用我**」——模型靠这句话选工具。
+        # 三条互相点名、划清边界（实测：只说「按编号查看」时，模型会拿
+        # 「置顶清单」回答「p1 的详情」）。
+        for skill_name, command, hint in (
+            ("search", "buptnews.search",
+             "【仅在用户明确要『找/搜/查』某类通知时用】按关键词检索本校通知库。"
+             "**不要**用在本该你回答的场合：用户只是引用一条通知说『现在呢』"
+             "『可以吗』『看看这个』『你能读到吗』时，先用已有内容回答/说明情况；"
+             "也不要为了『确认一下』反复搜同一个词。只查私聊。"),
+            ("recent", "buptnews.list",
+             "【仅在用户明确要『最近有什么通知』『有哪些置顶』时用】列出通知清单。"
+             "**不返回**任何一条的正文；要正文用 notice。"
+             "用户问的是某一条（带编号/被引用）时不要用本工具。"),
+            ("notice", "buptnews.get",
+             "【仅在用户给出编号、并要那一条的正文时用】"
+             "编号形如 476 / P1 / E1759-142679。"
+             "如果正文已经在你的上下文里（用户引用了它），**不要**再查 —— "
+             "直接读上下文回答。"
+             "⚠️ 用户要你『解读/总结/分析』时也不要调：那会结束这一轮，没人解释。"),
         ):
             try:
-                self.register_skill(skill_name, command=command)
+                self.register_skill(skill_name, command=command,
+                                    description=hint,
+                                    deliver=self._deliver_skill_output)
+            except TypeError as e:
+                # 进程里还是旧框架（不支持 deliver）→ 退回「调用方转发」。
+                # 功能照旧，只是转发层猜不准分段；重启进程后自动用上新路径。
+                self.logger.warning(
+                    "[bupt_news] 框架不支持 deliver（%s），技能 %s 退回默认转发；"
+                    "重启进程后由本插件自己发", e, command)
+                try:
+                    self.register_skill(skill_name, command=command)
+                except Exception as e2:  # noqa: BLE001
+                    self.logger.warning("[bupt_news] 注册技能 %s 失败：%s",
+                                        command, e2)
             except Exception as e:  # noqa: BLE001 - 技能失败不该影响插件启用
                 self.logger.warning("[bupt_news] 注册技能 %s 失败：%s",
                                     command, e)
@@ -2621,7 +2655,7 @@ class BuptNewsPlugin(PluginBase):
 
         只要 `err` 非空就原样回给调用方（两边的文案本来就是给人看的）。
         """
-        raw = str(raw or "").strip()
+        raw = str(raw or "").strip().lstrip("#＃")
         # 先按置顶编号查（P 前缀没有别的编号空间用，不会撞车）
         pin_entry = self._store.pin_entry(raw) if raw[:1].upper() == "P" else None
         if pin_entry:
@@ -2695,7 +2729,11 @@ class BuptNewsPlugin(PluginBase):
                     f"（仅保留最近 {self.config.get('notice_retention', 500)} 条）\n"
                     "💡 /buptnews list 看可查询编号 · "
                     "/buptnews search <关键词> 搜门户")
-        return (rec, f"#{nid} ", "")
+        # ⚠️ prefix **不要**再带 `#编号`：`_render_notice` 自己会拼
+        # `#{rec['id']}`，两处都加就变成 `📢 #476 #476 标题`（线上出现过）。
+        # P/E 那几支要带前缀，是因为它们有 `_render_notice` 不知道的信息
+        # （置顶号、门户编号），本地编号没有这种额外信息。
+        return (rec, "", "")
 
     async def _render_notice(self, rec: dict, *, prefix: str = "",
                              retry_summary: bool = True) -> list:
@@ -3015,6 +3053,49 @@ class BuptNewsPlugin(PluginBase):
         return sent, failed
 
     # ------------------------------------------------------------------ 命令
+
+    async def _deliver_skill_output(self, payload, ctx) -> None:
+        """AI 触发命令后，**由本插件把结果发出去**（不让调用方转发）。
+
+        为什么不由 ai_chat 转发：命令产物是 `MessageChain` / chain 列表 / 段列表，
+        还各有分段、图片、@ 的规矩；转发层猜一次就错一次（实测：chain 列表被当成
+        段列表，整条通知一个字都没发）。这里用本插件自己的 `api` 发，和推送、
+        命令回执走同一条路。
+        """
+        from napcat.message import MessageChain as _MC
+        parts: list = []
+        if isinstance(payload, _MC):
+            parts = [payload]
+        elif isinstance(payload, str):
+            parts = [_MC().text(payload)]
+        elif isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, _MC):
+                    parts.append(item)
+                elif isinstance(item, list):
+                    chain = _MC()
+                    for seg in item:
+                        if isinstance(seg, dict) and seg.get("type"):
+                            chain._segments.append(seg)
+                    if chain:
+                        parts.append(chain)
+                elif isinstance(item, dict) and item.get("type"):
+                    chain = _MC()
+                    chain._segments.append(item)
+                    parts.append(chain)
+        if not parts:
+            return
+        gid = int(getattr(ctx, "group_id", 0) or 0)
+        uid = int(getattr(ctx, "user_id", 0) or 0)
+        for chain in parts:
+            try:
+                if gid:
+                    await self.api.send_group_msg(str(gid), chain)
+                elif uid:
+                    await self.api.send_private_msg(str(uid), chain)
+            except Exception as e:  # noqa: BLE001 - 发失败不该炸掉对话
+                self.logger.warning("[bupt_news] 技能结果发送失败：%r", e)
+                break
 
     def _register_commands(self) -> None:
         self._command_names = []
