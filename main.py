@@ -608,6 +608,7 @@ class BuptNewsPlugin(PluginBase):
             try:
                 self.register_skill(skill_name, command=command,
                                     description=hint,
+                                    prompt_hint=hint,
                                     deliver=self._deliver_skill_output)
             except TypeError as e:
                 # 进程里还是旧框架（不支持 deliver）→ 退回「调用方转发」。

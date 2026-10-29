@@ -265,14 +265,31 @@ def is_renderable(table: Table) -> bool:
 
 # ------------------------------------------------------------------ 渲染
 
+# ⚠️ Chromium 的定位/启动/超时统一由框架提供（`napcat.render`）。老进程里
+# 还没有这个模块，直接 import 会把插件打挂 → 拿不到就按路径加载同一份实现。
+try:
+    from napcat.render import RenderError as _RenderError
+    from napcat.render import find_chromium as _find_chromium
+    from napcat.render import run_chromium as _run_chromium
+except ImportError:
+    import importlib.util as _ilu
+    import sys as _sys
+
+    _spec = _ilu.spec_from_file_location(
+        "napcat_render_boot_tbl",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))), "napcat", "render.py"))
+    _mod = _ilu.module_from_spec(_spec)
+    _sys.modules["napcat_render_boot_tbl"] = _mod
+    _spec.loader.exec_module(_mod)
+    _RenderError = _mod.RenderError
+    _find_chromium = _mod.find_chromium
+    _run_chromium = _mod.run_chromium
+
 
 def find_browser() -> Optional[str]:
-    """找一个可用的 chromium。"""
-    for name in _CHROMIUM_CANDIDATES:
-        path = shutil.which(name)
-        if path:
-            return path
-    return None
+    """找一个可用的 chromium（框架版，候选名单只有一份）。"""
+    return _find_chromium()
 
 
 def _page_html(table_html: str) -> str:
@@ -319,20 +336,18 @@ async def _run_browser(browser: str, page: str, *extra: str,
         page_path = os.path.join(td, "page.html")
         with open(page_path, "w", encoding="utf-8") as f:
             f.write(page)
-        cmd = [browser, "--headless", "--no-sandbox", "--disable-gpu",
-               "--disable-dev-shm-usage", "--hide-scrollbars",
-               "--force-device-scale-factor=1",
-               f"--user-data-dir={os.path.join(td, 'profile')}",
-               *extra, f"file://{page_path}"]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        # 表格截图要**精确像素**，所以仍用老的 `--headless`（新版会带缩放差异），
+        # 并固定 DPR=1；这两个是与业务相关的取舍，留在调用方。
         try:
-            out, _ = await asyncio.wait_for(proc.communicate(), BROWSER_TIMEOUT)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            rc, out, _err = await _run_chromium(
+                browser, ["--hide-scrollbars", "--force-device-scale-factor=1",
+                          *extra, "file://" + page_path],
+                profile=os.path.join(td, "profile"),
+                timeout=BROWSER_TIMEOUT, headless="--headless",
+                stderr_to_null=True)
+        except _RenderError:
             return -1, ""
-        return proc.returncode or 0, (out or b"").decode("utf-8", "replace")
+        return rc, out
 
 
 async def render_table_png(table_html: str, out_path: str, *,
