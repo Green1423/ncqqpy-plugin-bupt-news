@@ -1246,16 +1246,7 @@ class BuptNewsPlugin(PluginBase):
 
             kind, target = binding["kind"], binding["target"]
             label = f"{'群' if kind == 'group' else '用户'} {target}"
-            # 通知谁：群里是"设置 token 的那位"，用户就是他自己
-            spec = self._target(kind, target) or {}
-            who = int(spec.get("token_by") or 0)
-            if not who and kind == "user":
-                who = int(target)
-            if not who:
-                # 历史 token 没记设置者（功能上线前写入的）→ 退给超管，
-                # 否则过期了没有任何人会被通知到。
-                who = sorted(getattr(self.perm, "_superusers", set()) or [])[0] \
-                    if getattr(self.perm, "_superusers", None) else 0
+            who = self._token_owner(kind, target)
             cmd = (f"/buptnews dektoken group {target} <JWT>" if kind == "group"
                    else "/buptnews dektoken user <JWT>")
             if left <= 0:
@@ -1283,6 +1274,69 @@ class BuptNewsPlugin(PluginBase):
                 self.logger.info("[bupt_news] 已私聊提醒 %s 续期第二课堂 token", who)
             except Exception as e:  # noqa: BLE001 - 通知失败不影响同步
                 self.logger.warning("[bupt_news] 提醒 %s 续期失败：%s", who, e)
+
+    def _token_owner(self, kind: str, target: int) -> int:
+        """这个绑定的 token 该提醒谁：设置者 → 用户本人 → 超管兜底。
+
+        历史 token（功能上线前写入的）没记 `token_by`，不给兜底就**没有任何人**
+        会收到提醒，活动同步会一直静默停摆。
+        """
+        spec = self._target(kind, target) or {}
+        who = int(spec.get("token_by") or 0)
+        if not who and kind == "user":
+            who = int(target)
+        if not who:
+            supers = getattr(self.perm, "_superusers", None) or set()
+            who = sorted(supers)[0] if supers else 0
+        return who
+
+    async def _warn_token_invalid(self, binding: dict, *, reason: str = "") -> None:
+        """token **已经被服务端判废**时私聊通知设置者（每个绑定每天一次）。
+
+        与 `_warn_token_expiry` 是两个口子，别合并：
+
+        * 那个看 `exp` 时间戳，提前预警（还没坏就提醒）；
+        * 这个看**实际请求结果**（`DektAuthError`）—— token 可能没到期就被判废
+          （改了密码、服务端清会话、风控），光看 exp 永远等不到提醒，
+          活动同步会一直静默停摆（线上就是这个状态：只打了一行日志，
+          设置者本人毫不知情）。
+        """
+        kind, target = binding["kind"], binding["target"]
+        key = f"{kind}-{target}"
+        today = self._today()
+        # ⚠️ 与 `_warn_token_expiry` **共用同一个日期表**：两个入口都在提醒
+        # "这个 token 要换了"，各记各的就会同一天发两条（早上"已过期" +
+        # 第一次 401 的"已失效"）。谁先发谁记账，当天另一条自动静默。
+        sent = self._store.meta_get("token_warn_dates")
+        if not isinstance(sent, dict):
+            sent = {}
+        if sent.get(key) == today:
+            return                      # 今天已经提醒过（不管哪个入口）
+        sent[key] = today
+        try:
+            self._store.meta_set("token_warn_dates", sent)
+        except Exception as e:  # noqa: BLE001 - 落盘失败不该拦住提醒
+            self.logger.warning("[bupt_news] 记录提醒日期失败：%s", e)
+
+        label = f"{'群' if kind == 'group' else '用户'} {target}"
+        who = self._token_owner(kind, target)
+        cmd = (f"/buptnews dektoken group {target} <JWT>" if kind == "group"
+               else "/buptnews dektoken user <JWT>")
+        self.logger.error(
+            "[bupt_news] %s 的第二课堂 token 已失效（%s），活动同步暂停；"
+            "已提醒设置者 %s", label, reason or "服务端拒绝", who or "未知")
+        if not who:
+            return
+        try:
+            await self.api.send_private_msg(str(who), MessageChain().text(
+                f"❌ 第二课堂 token 已失效\n"
+                f"{label} 的 token 被服务器拒绝了"
+                + (f"（{reason}）" if reason else "") + "，活动同步已暂停。\n"
+                f"重新登录（微信小程序）后发：{cmd}\n"
+                f"💡 只要换成新 token 就会自动恢复，不用重启。"))
+            self.logger.info("[bupt_news] 已私聊提醒 %s 更新第二课堂 token", who)
+        except Exception as e:  # noqa: BLE001 - 通知失败不影响同步
+            self.logger.warning("[bupt_news] 提醒 %s 更新 token 失败：%s", who, e)
 
     # -------------------------------------------------- 第二课堂（独立绑定）
 
@@ -1681,7 +1735,15 @@ class BuptNewsPlugin(PluginBase):
                 self.logger.warning("[bupt_news] 绑定「%s」重读 token 失败：%s",
                                     name, e)
         if not getattr(client, "available", False):
-            return (0, 0, True)      # 缺 token：重试也没用，按正常节奏等它补上
+            # 分两种：
+            #   * 文件不存在 —— 还没配，静默等它配（不是故障）；
+            #   * 文件在、但解析不出 JWT —— **有人写进了一个坏值**
+            #     （线上真实出现过：文件里存的是它自己的路径），
+            #     此时必须让设置者知道，否则活动同步静默停摆、日志也没人看。
+            if os.path.exists(binding.get("token_file") or ""):
+                await self._warn_token_invalid(
+                    binding, reason="token 文件里不是有效的 JWT")
+            return (0, 0, True)
 
         try:
             me = await client.me()
@@ -1689,6 +1751,9 @@ class BuptNewsPlugin(PluginBase):
             self.logger.warning(
                 "[bupt_news] 绑定「%s」的 token 已失效，跳过（新 JWT 写入 %s 即恢复）",
                 name, binding["token_file"])
+            # 光记日志没人看得到 —— 设置者本人必须收到通知，否则活动同步
+            # 就这么静默停了（线上真实发生过）。
+            await self._warn_token_invalid(binding, reason="读取账号信息被拒")
             return (0, 0, True)
 
         user = me.get("user") or {}
@@ -1702,6 +1767,7 @@ class BuptNewsPlugin(PluginBase):
             )
         except DektAuthError:
             self.logger.warning("[bupt_news] 绑定「%s」的 token 失效，跳过", name)
+            await self._warn_token_invalid(binding, reason="拉取活动被拒")
             return (0, 0, True)
         except Exception as e:  # noqa: BLE001
             # 网络/DNS/超时：**这轮算失败**，让调度早点重试（见 `_schedule_next_activity`）
@@ -3884,6 +3950,26 @@ class BuptNewsPlugin(PluginBase):
                             f"   或让 {owner} 自己重设（续期）")
 
             # 写盘 + 立即生效（不重启）
+            # ⚠️ **先校验再落盘**：早先是"先写、再警告"，于是拿一个路径或半截
+            # 字符串当 token 也会存进去 —— 之后只表现为「token 已失效」，
+            # 排查半天才发现文件里根本不是 JWT（线上真实发生过）。
+            if os.path.isfile(token):
+                # 用户给的是文件路径（很常见的误操作）→ 帮他读出来
+                try:
+                    with open(token, encoding="utf-8") as f:
+                        token = f.read()
+                except OSError as e:
+                    return f"❌ 读不出 {token}：{e}"
+            claims = decode_jwt(token)
+            if not claims.get("sub") or not claims.get("exp"):
+                return ("❌ 这不像第二课堂的 JWT（解不出 sub/exp），**没有保存**。\n"
+                        "   正确做法：微信小程序登录后，从 "
+                        "`localStorage[\"secondclass.tokenv3\"]` 复制**整段** token"
+                        "（三段、用点分隔）。")
+            if float(claims["exp"]) <= time.time():
+                when = datetime.fromtimestamp(float(claims["exp"]))
+                return (f"❌ 这个 token 已经过期（{when:%Y-%m-%d %H:%M}），"
+                        "保存了也没用 —— 请重新登录后复制新的。")
             try:
                 path = self._write_token(kind, target, token)
             except OSError as e:
@@ -3897,18 +3983,22 @@ class BuptNewsPlugin(PluginBase):
                 decode_jwt(token).get("sub") or "")
             self._save_targets(data)
             binding = self._refresh_activity_bindings()
-            ok = any(b["kind"] == kind and b["target"] == target
-                     and b["client"].available for b in binding)
+            # ⚠️ 这里**不再**用 `client.available` 判断"token 有没有效"：
+            # 它受 `afterclass.enabled` / `event` 开关影响，关着的时候永远是
+            # False —— 于是**好 token 也会被报成"不是有效的 JWT"**（误报，
+            # 而且会让人以为自己复制错了）。
+            # token 本身在写盘**之前**已经校验过（解得出 sub/exp、未过期），
+            # 这里只负责如实说明"活动同步有没有立刻生效"。
+            active = any(b["kind"] == kind and b["target"] == target
+                         for b in binding)
+            exp = datetime.fromtimestamp(float(claims["exp"]))
             self.logger.info("[bupt_news] 已更新 %s %s 的第二课堂 token"
-                             "（设置者 %s，有效=%s）", kind, target, uid, ok)
-            if not ok:
-                return ("⚠️ token 已保存，但它**不是有效的 JWT**（解不出 sub）。\n"
-                        "   请确整段复制 `localStorage[\"secondclass.tokenv3\"]` 的值。")
-            exp = None
-            for b in binding:
-                if b["kind"] == kind and b["target"] == target:
-                    exp = b["client"].expiry()
-            tail = f"（有效期至 {exp:%Y-%m-%d %H:%M}）" if exp else ""
+                             "（设置者 %s，活动绑定生效=%s）", kind, target, uid, active)
+            tail = f"（有效期至 {exp:%Y-%m-%d %H:%M}）"
+            if not active:
+                return (f"✅ 已保存 {label} {target} 的第二课堂 token{tail}。\n"
+                        f"⚠️ 活动同步还没启用：需要 `event=on` 且"
+                        f" `afterclass.enabled=true`，启用后自动生效（不用重发 token）。")
             return (f"✅ 已保存 {label} "
                     f"{target} 的第二课堂 token{tail}，活动同步已生效")
 
