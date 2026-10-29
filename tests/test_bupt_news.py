@@ -1008,8 +1008,9 @@ async def main(online: bool) -> int:
           access("private", 10001, GROUP_BOUND))
     check("非绑定群的小窗被拒（同一用户在绑定群里仍然可用）",
           not access("private", 10001, 100000002))
-    check("群聊不受范围限制（准入由框架 bound_groups 负责）",
-          access("group", 10001, 100000002))
+    check("群聊同样要求群在 targets 里（不回落框架 bound_groups）",
+          not access("group", 10001, 100000002))
+    check("白名单群照常可用", access("group", 10001, GROUP_BOUND))
     check("无上下文（直接渲染帮助）不拦", plugin.check_access(None))
 
     # 强制点：命令处理器外面的守卫
@@ -1113,7 +1114,7 @@ async def main(online: bool) -> int:
             check("默认：绑定群的来源小窗也不再放行",
                   not access("private", 10001, GROUP_BOUND))
             check("默认：超级用户照旧豁免", access("private", SUPERUSER))
-            check("默认：群聊照旧不受限", access("group", 10001, GROUP_BOUND))
+            check("默认：群聊也要群在白名单里", not access("group", 10001, GROUP_BOUND))
         finally:
             plugin.config.set("targets", keep_targets)
 

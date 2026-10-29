@@ -129,7 +129,6 @@ from datetime import datetime, time as dtime
 from pathlib import Path
 from typing import Optional
 
-from napcat.command import GROUP_AT_HINT
 from napcat.message import MessageChain
 from napcat.plugin import PluginBase
 
@@ -272,6 +271,8 @@ from .store import (PIN_LIMIT_REACHED, StateStore, decode_external,
                    external_code, external_url, is_external_code)
 from .summarize import Summarizer, fallback_summary
 from .weather import WeatherClient, weather_line
+
+from napcat.scope import Scope, parse_ids
 
 SYNC_TIMER = "bupt_news.sync"
 # AI 摘要的全部默认值（单一来源）：`on_load` 逐键写入 config，
@@ -676,25 +677,8 @@ class BuptNewsPlugin(PluginBase):
 
     @staticmethod
     def _to_ids(value) -> set[int]:
-        """配置里的「号列表」→ 正整数集合（QQ 号 / 群号）。
-
-        `bool` 是 `int` 的子类，`True` 会被 `int()` 收成 `1` —— 配置文件里写成
-        `binding: {users: true}` 这种笔误不该悄悄变成「放行 QQ 1」，直接丢弃。
-        非列表的值（`users: 123` 这种少写了方括号的）按空处理，不抛异常。
-        """
-        if not isinstance(value, (list, tuple, set)):
-            return set()
-        out: set[int] = set()
-        for v in value:
-            if isinstance(v, bool):
-                continue
-            try:
-                num = int(v)
-            except (TypeError, ValueError):
-                continue
-            if num > 0:
-                out.add(num)
-        return out
+        """配置里的「号列表」→ 正整数集合（解析口径见 `napcat.scope.parse_ids`）。"""
+        return parse_ids(value)
 
     def _int_list(self, key: str) -> list[int]:
         return sorted(self._to_ids(self.config.get(key)))
@@ -829,20 +813,15 @@ class BuptNewsPlugin(PluginBase):
         """允许**直接私聊**用命令的 QQ 号 = 所有用户绑定。"""
         return set(self._targets()["users"])
 
-    def _bound_groups(self) -> set[int]:
-        """允许**群聊临时会话（小窗）**用命令的来源群 = 所有群绑定。
+    def _scope(self) -> Scope:
+        """服务范围（口径见 `napcat.scope`）：只看 `targets`，空 = 谁都不用。"""
+        targets = self._targets()
+        return Scope(groups=frozenset(targets["groups"]),
+                     users=frozenset(targets["users"]))
 
-        没配任何群绑定时沿用框架的 `bound_groups`（`/groups` 那份）—— 「监听
-        哪些群」与「哪些群的小窗能调命令」默认同一批；注意框架那份为空表示
-        监听**所有**群，语义与白名单相反，所以只在非空时兜底。
-        """
-        own = set(self._targets()["groups"])
-        if own:
-            return own
-        try:
-            return self._to_ids(self.bound_groups)
-        except Exception:  # noqa: BLE001 - 拿不到框架绑定就按「没配」处理
-            return set()
+    def _bound_groups(self) -> set[int]:
+        """允许用命令的群 = `targets.groups`（空 = 一个都不许，不回落框架绑定）。"""
+        return set(self._scope().groups)
 
     def _private_scope_hint(self) -> str:
         return ("私聊可用范围 = 绑定群的群聊临时会话（小窗）+ 绑定用户，"
@@ -869,17 +848,8 @@ class BuptNewsPlugin(PluginBase):
             return False
         if self.perm.is_superuser(user_id):
             return True
-        if getattr(event, "message_type", "") != "private":
-            return True                       # 群聊：准入由框架的 bound_groups 负责
-        users = self._bound_users()
-        if user_id in users:
-            return True                       # 直接私聊白名单
-        if getattr(event, "is_temp_session", False):
-            # 用 `_to_ids` 而不是 `int(...)`：字段缺失/写成非数字时不该抛异常
-            # （注意 `set() <= 白名单` 恒为真，所以不能拿空集合去比）
-            source = self._to_ids([getattr(event, "group_id", None)])
-            return bool(source) and source <= self._bound_groups()
-        return False
+        # 群聊 / 群小窗按来源群、直接私聊按用户（统一口径见 `napcat.scope`）
+        return self._scope().event_ok(event)
 
     # 被服务范围挡下的调用者：`{user_id: (上次日志时间, 累计次数)}`。
     # 只用于日志节流 —— 不回复任何提示（命令存在性都不暴露，见 check_access 的调用点）。

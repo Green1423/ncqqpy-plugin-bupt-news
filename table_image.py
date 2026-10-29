@@ -18,16 +18,16 @@
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import html as _html
 import os
 import re
-import shutil
 import tempfile
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Iterable, Optional
+
+from napcat.persist import prune_unreferenced
 
 # 表格里的 `table://<id>` 引用（与图片的 http(s) URL 区分开）
 TABLE_SCHEME = "table://"
@@ -38,9 +38,6 @@ MAX_HEIGHT = 4000
 FONT_SIZE = 17
 CELL_PADDING = 6
 BROWSER_TIMEOUT = 25.0
-
-_CHROMIUM_CANDIDATES = ("chromium", "chromium-browser", "google-chrome",
-                        "google-chrome-stable", "chrome")
 
 # 主文档 CSS：只负责隔离与缩放到可读宽度，表格自身样式（边框/对齐）保持原样
 _PAGE_CSS = """
@@ -472,20 +469,8 @@ class TableImageStore:
     def prune(self, keep: Iterable[str]) -> int:
         """删除不再被引用的表格图片（`keep` 是仍在用的路径集合）。"""
         keep_set = {os.path.basename(p) for p in keep if p}
-        removed = 0
-        try:
-            names = os.listdir(self.directory)
-        except OSError:
-            return 0
-        for name in names:
-            if not name.endswith(".png") or name in keep_set:
-                continue
-            try:
-                os.unlink(os.path.join(self.directory, name))
-                removed += 1
-            except OSError:
-                pass
-        return removed
+        return len(prune_unreferenced(self.directory, keep=keep_set,
+                                      only_suffix=".png"))
 
     def stats(self) -> tuple[int, int]:
         """(文件数, 总字节数)。"""

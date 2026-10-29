@@ -20,6 +20,8 @@ from typing import Iterable, Optional
 
 from .portal import PortalAuthError
 
+from napcat.persist import prune_unreferenced
+
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024        # 单张图上限 10MB
 
 _MAGIC_EXT = (
@@ -169,31 +171,16 @@ class ImageCache:
 
         刚下载的文件（`min_prune_age` 秒内）不动，避免与正在发送的消息抢文件。
         """
-        keep = {image_key(u) for u in keep_urls if u}
-        try:
-            names = os.listdir(self.directory)
-        except OSError:
-            return 0
-        removed = 0
-        now = time.time()
-        for name in names:
-            path = os.path.join(self.directory, name)
-            if name.endswith(".tmp"):
-                pass
-            elif name.split(".", 1)[0] in keep:
-                continue
-            try:
-                if not os.path.isfile(path):
-                    continue
-                if now - os.path.getmtime(path) < self.min_prune_age:
-                    continue
-                os.remove(path)
-                removed += 1
-            except OSError:
-                continue
+        removed = prune_unreferenced(
+            self.directory,
+            keep={image_key(u) for u in keep_urls if u},
+            key=lambda name: name.split(".", 1)[0],
+            always_delete=".tmp",
+            min_age=self.min_prune_age,
+        )
         if removed:
-            self._log("info", "图片缓存已清理 %d 个文件", removed)
-        return removed
+            self._log("info", "图片缓存已清理 %d 个文件", len(removed))
+        return len(removed)
 
     def stats(self) -> tuple[int, int]:
         """返回 (文件数, 总字节数)。"""

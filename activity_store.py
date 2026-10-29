@@ -14,8 +14,10 @@
 from __future__ import annotations
 
 import json
-import os
+
 import time
+
+from napcat.persist import write_json
 
 
 class ActivityStore:
@@ -44,13 +46,7 @@ class ActivityStore:
                 self._data[key] = value
 
     def save(self) -> None:
-        d = os.path.dirname(self.path)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, ensure_ascii=False, separators=(",", ":"))
-        os.replace(tmp, self.path)
+        write_json(self.path, self._data)
 
     # ---------------- 记录 ----------------
 

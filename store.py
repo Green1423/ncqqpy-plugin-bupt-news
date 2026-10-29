@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import json
 import os
+
 import re
 import time
 from typing import Iterable, Optional
+
+from napcat.persist import write_json
 
 STATE_VERSION = 2
 
@@ -181,13 +184,7 @@ class StateStore:
         self._prune_pins()
 
     def save(self) -> None:
-        d = os.path.dirname(self.state_path)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        tmp = self.state_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, ensure_ascii=False, separators=(",", ":"))
-        os.replace(tmp, self.state_path)
+        write_json(self.state_path, self._data)
 
     def _rebuild_index(self) -> None:
         self._index = {str(c): set(v) for c, v in self._data["seen"].items()}
