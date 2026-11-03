@@ -272,7 +272,7 @@ from .store import (PIN_LIMIT_REACHED, StateStore, decode_external,
 from .summarize import Summarizer, fallback_summary
 from .weather import WeatherClient, weather_line
 
-from napcat.scope import Scope, parse_ids
+from napcat.subscribe import Subscription, parse_ids
 
 SYNC_TIMER = "bupt_news.sync"
 # AI 摘要的全部默认值（单一来源）：`on_load` 逐键写入 config，
@@ -667,7 +667,7 @@ class BuptNewsPlugin(PluginBase):
 
     @staticmethod
     def _to_ids(value) -> set[int]:
-        """配置里的「号列表」→ 正整数集合（解析口径见 `napcat.scope.parse_ids`）。"""
+        """配置里的「号列表」→ 正整数集合（解析口径见 `napcat.subscribe.parse_ids`）。"""
         return parse_ids(value)
 
     def _int_list(self, key: str) -> list[int]:
@@ -803,15 +803,15 @@ class BuptNewsPlugin(PluginBase):
         """允许**直接私聊**用命令的 QQ 号 = 所有用户绑定。"""
         return set(self._targets()["users"])
 
-    def _scope(self) -> Scope:
-        """服务范围（口径见 `napcat.scope`）：只看 `targets`，空 = 谁都不用。"""
+    def _subscription(self) -> Subscription:
+        """服务范围（口径见 `napcat.subscribe`）：只看 `targets`，空 = 谁都不用。"""
         targets = self._targets()
-        return Scope(groups=frozenset(targets["groups"]),
+        return Subscription(groups=frozenset(targets["groups"]),
                      users=frozenset(targets["users"]))
 
     def _bound_groups(self) -> set[int]:
         """允许用命令的群 = `targets.groups`（空 = 一个都不许，不回落框架绑定）。"""
-        return set(self._scope().groups)
+        return set(self._subscription().groups)
 
     def _private_scope_hint(self) -> str:
         return ("私聊可用范围 = 绑定群的群聊临时会话（小窗）+ 绑定用户，"
@@ -838,8 +838,8 @@ class BuptNewsPlugin(PluginBase):
             return False
         if self.perm.is_superuser(user_id):
             return True
-        # 群聊 / 群小窗按来源群、直接私聊按用户（统一口径见 `napcat.scope`）
-        return self._scope().event_ok(event)
+        # 群聊 / 群小窗按来源群、直接私聊按用户（统一口径见 `napcat.subscribe`）
+        return self._subscription().event_ok(event)
 
     # 被服务范围挡下的调用者：`{user_id: (上次日志时间, 累计次数)}`。
     # 只用于日志节流 —— 不回复任何提示（命令存在性都不暴露，见 check_access 的调用点）。
