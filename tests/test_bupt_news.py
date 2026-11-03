@@ -2234,7 +2234,8 @@ async def main(online: bool) -> int:
         def __init__(self):
             self.payloads = []
 
-        async def request(self, payload, timeout=30.0):
+        async def request(self, payload, timeout=30.0, *, throttle=True):
+            # 与 `WsClient.request` 同签名：框架会传 throttle（分块传输时关掉）
             self.payloads.append(payload)
             return ApiResponse(status="ok", retcode=0, data={"message_id": 1},
                                echo=payload.get("echo"))

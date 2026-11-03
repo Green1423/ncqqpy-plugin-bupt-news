@@ -7,7 +7,7 @@
 - **短 ID**：每条通知分配 `#1` 递增编号，可用 `/buptnews get <编号>` 查回全文（**图文按原排版**）与原文链接（含附件入口）
 - **20 字摘要**：推送只含 DeepSeek 生成的 ≤20 汉字梗概（批量调用；失败降级为标题截断）
 设计规格见 `specs/2026-09-24-bupt-news-digest-design.md`，实施计划见 `plans/2026-09-24-bupt-news-digest.md`。
-相关文档：[`usage.md`](https://github.com/Green1423/ncqqpy/blob/main/docs/guide/README.md)（框架使用）· [`plugin-dev.md`](https://github.com/Green1423/ncqqpy/blob/main/docs/plugin-dev/README.md)（插件开发）· [`ai-chat.md`](https://github.com/Green1423/ncqqpy/blob/main/docs/plugins/ai-chat/README.md)（同款「服务范围」闸门）· [`byrdocs.md`](https://github.com/Green1423/ncqqpy/blob/main/docs/plugins/byrdocs/README.md)（白名单）· [`ncqq-watchdog.md`](https://github.com/Green1423/ncqqpy/blob/main/docs/reference/watchdog/README.md)（服务器看门狗）。
+相关文档：[`usage.md`](https://github.com/Green1423/ncqqpy/blob/main/docs/guide/README.md)（框架使用）· [`plugin-dev.md`](https://github.com/Green1423/ncqqpy/blob/main/docs/plugin-dev/README.md)（插件开发）· [`ai-chat.md`](https://github.com/Green1423/ncqqpy-plugin-ai-chat/blob/main/docs/ai-chat/README.md)（同款「服务范围」闸门）· [`byrdocs.md`](https://github.com/Green1423/ncqqpy-plugin-byrdocs/blob/main/docs/byrdocs/README.md)（白名单）· [`ncqq-watchdog.md`](https://github.com/Green1423/ncqqpy/blob/main/docs/reference/watchdog/README.md)（服务器看门狗）。
 
 ## 章节
 

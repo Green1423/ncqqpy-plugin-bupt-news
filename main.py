@@ -633,7 +633,7 @@ class BuptNewsPlugin(PluginBase):
 
     async def on_disable(self):
         await super().on_disable()
-        self.cancel_schedule(SYNC_TIMER)
+        self.timer.cancel(SYNC_TIMER)
         for cname in list(self._command_names):
             try:
                 self.unregister_command(cname)
@@ -965,7 +965,7 @@ class BuptNewsPlugin(PluginBase):
         )
 
     def _reschedule(self) -> None:
-        self.cancel_schedule(SYNC_TIMER)
+        self.timer.cancel(SYNC_TIMER)
         self._schedule_sync()
 
     # ------------------------------------------------------------------ 同步主流程
