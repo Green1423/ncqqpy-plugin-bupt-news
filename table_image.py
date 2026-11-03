@@ -35,7 +35,6 @@ TABLE_SCHEME = "table://"
 # 渲染尺寸上限：避免超大表格把消息撑爆或截图超时
 MAX_WIDTH = 1400
 MAX_HEIGHT = 4000
-FONT_SIZE = 17
 CELL_PADDING = 6
 BROWSER_TIMEOUT = 25.0
 

@@ -336,16 +336,6 @@ SUMMARY_DEFAULTS = {
 SEEN_SCOPE = "_all"          # 全局去重桶：同一通知在多个栏目出现也只算一条
 DEFAULT_COLUMNS = [1154]
 
-COLUMN_NAMES = {
-    "1154": "校内通知",
-    "1305": "公示公告",
-    "1221": "校内新闻",
-    "2001": "校内文件",
-    "2002": "校内通报",
-    "1536": "规章制度",
-    "1524": "办事指南",
-}
-
 
 class BuptNewsPlugin(PluginBase):
     name = "bupt_news"
@@ -1361,11 +1351,6 @@ class BuptNewsPlugin(PluginBase):
             except Exception:  # noqa: BLE001 - 关闭失败不值得再抛
                 pass
 
-    def _activity_binding(self, kind: str, target: int) -> dict | None:
-        for b in getattr(self, "_act_bindings", []) or []:
-            if b["kind"] == kind and b["target"] == int(target):
-                return b
-        return None
 
     def _refresh_activity_bindings(self) -> list:
         """配置一变就重建活动绑定，**立即生效**（不用重启/等下一轮）。"""

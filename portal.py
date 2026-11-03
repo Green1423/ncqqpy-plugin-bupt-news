@@ -276,8 +276,8 @@ class _ContentExtractor(HTMLParser):
     """提取 #vsb_content / .v_news_content 容器的正文。
 
     - `text()`               → 纯文本（与历史行为完全一致，图片不产生任何字符）
-    - `body_and_images()`    → (纯文本, [{pos, url}])，pos 是图片在文本中的字符偏移，
-                               用于按原页面顺序把图文重新拼成一条消息
+    - `body_and_media()`     → (纯文本, [{pos, url|table}])，pos 是素材在文本中的
+                               字符偏移，用于按原页面顺序把图文/表格拼成一条消息
     """
 
     VOID = {
@@ -409,14 +409,6 @@ class _ContentExtractor(HTMLParser):
         t = _TABLE_SENTINEL_RE.sub("", self.marked_text())
         return _IMG_SENTINEL_RE.sub("", t).strip()
 
-    def body_and_images(self) -> tuple[str, list[dict]]:
-        """返回 (正文, [{"pos", "url"}])；pos 为图片前已产出的正文字符数。
-
-        表格也会以 `{"pos", "table": <index>}` 混在同一个列表里返回（见
-        `body_and_media()`），保证图文表三者的顺序与原文一致。
-        """
-        body, media = self.body_and_media()
-        return body, [it for it in media if it.get("url")]
 
     def body_and_media(self) -> tuple[str, list[dict]]:
         """返回 (正文, [{pos, url} | {pos, table}])：图片与表格按原顺序混排。
