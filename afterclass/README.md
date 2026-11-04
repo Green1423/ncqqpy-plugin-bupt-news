@@ -38,3 +38,18 @@ echo '<JWT>' > plugins/bupt_news/afterclass/token.txt
 
 先把 `config.json` 的 `plugins.bupt_news.afterclass.enabled` 设为 `true`，
 同步就会在每轮通知同步之后跑一次。
+
+## 没有真账号也能联调
+
+[`final_draft.md`](final_draft.md) 是对小程序的行为分析报告。依据它实现的**离线
+模拟器**在 [`tools/dekt_sim/`](../../../tools/dekt_sim/README.md)：43 条内存路由 +
+三种编码算法 + 18 个场景，不发真实请求、不碰生产。
+
+```bash
+./venv-arm/bin/python -B -m tools.dekt_sim scenarios   # 只跑场景
+./venv-arm/bin/python -B -m tools.dekt_sim serve       # 起本地假后端（127.0.0.1）
+./venv-arm/bin/python -B tests/test_dekt_sim.py        # 自检 79 项
+```
+
+用它验证的是**客户端的走法**（拉活动 → 归一化 → 报名/签到规则），不能替代真实
+服务端的鉴权与名额规则 —— 那些仍需授权环境里复核。
