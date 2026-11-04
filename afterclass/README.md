@@ -42,7 +42,7 @@ echo '<JWT>' > plugins/bupt_news/afterclass/token.txt
 ## 没有真账号也能联调
 
 [`final_draft.md`](final_draft.md) 是对小程序的行为分析报告。依据它实现的**离线
-模拟器**在 [`tools/dekt_sim/`](../../../tools/dekt_sim/README.md)：43 条内存路由 +
+模拟器**在**框架仓库**的 `tools/dekt_sim/`（不在本插件仓库里）：43 条内存路由 +
 三种编码算法 + 18 个场景，不发真实请求、不碰生产。
 
 ```bash
