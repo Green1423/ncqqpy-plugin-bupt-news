@@ -33,12 +33,65 @@ USER_AGENT = (
 )
 # 小程序会把版本号一起带上；服务端对缺失它多数接口仍放行，带上更接近真实客户端
 UAPP_VERSION = "1.0.0"
+#: 小程序 GET 的重试策略（API.md §1）：非 2xx / 网络错误最多重试 2 次，
+#: 每次追加 `_fly_retry=n`、超时 +2s（首次 2s → 4s → 6s）。
+GET_RETRIES = 2
+GET_TIMEOUT = 2.0
+GET_TIMEOUT_STEP = 2.0
 TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "afterclass", "token.txt")
 
 
+def _retryable(err: Exception) -> bool:
+    """这个错误值不值得重试：5xx 与 429 算，其余 4xx 不算（再试也一样）。"""
+    status = int(getattr(err, "status", 0) or 0)
+    return status >= 500 or status == 429
+
+
+def _device_file(token_file: str) -> str:
+    """设备号落盘路径：跟 token 放一起（同一"安装"应保持同一设备号）。"""
+    return os.path.join(os.path.dirname(os.path.abspath(token_file)) or ".",
+                        "device36.txt")
+
+
+def _load_or_make_device36(token_file: str) -> str:
+    """读/建设备号（base36，7~12 位）。
+
+    为什么必须稳定：小程序每个鉴权请求都带 `_=<device36><ts>`，服务端把它当
+    设备指纹的一部分；每次重启换一个号比固定一个号更像爬虫。
+    """
+    path = _device_file(token_file)
+    try:
+        with open(path, encoding="utf-8") as f:
+            got = f.read().strip()
+        if got and all(c in "0123456789abcdefghijklmnopqrstuvwxyz" for c in got):
+            return got
+    except OSError:
+        pass
+    raw = int.from_bytes(os.urandom(6), "big")
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    out = []
+    while raw:
+        raw, rem = divmod(raw, 36)
+        out.append(digits[rem])
+    value = "".join(reversed(out)) or "0"
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        # 与 token 同目录，权限口径统一（不是凭据，但别留个写权限给别人）
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(value + "\n")
+    except OSError:
+        pass                                 # 落不了盘就退化成本进程内固定
+    return value
+
+
 class DektError(RuntimeError):
-    """第二课堂接口调用失败。"""
+    """第二课堂接口调用失败。`status` 是 HTTP 状态（拿不到就是 0）。"""
+
+    def __init__(self, message: str, *, status: int = 0):
+        super().__init__(message)
+        self.status = int(status or 0)
 
 
 class DektAuthError(DektError):
@@ -103,7 +156,7 @@ def _unwrap(payload: Any, status: int) -> dict:
     if status >= 400 or payload.get("status") == "error":
         msg = payload.get("error") or payload.get("message") or payload.get("msg") \
             or f"HTTP {status}"
-        raise DektError(str(msg))
+        raise DektError(str(msg), status=status)
     return payload
 
 
@@ -118,6 +171,11 @@ class DektClient:
         self._token_file = token_file
         self.token = load_token(token, token_file)
         self._session: Optional[aiohttp.ClientSession] = None
+        #: 设备号（base36）：小程序的 `_` 参数是 `<device36><毫秒时间戳>`，
+        #: 同一台"设备"要稳定 —— 每次随机反而更像爬虫。落在 token 同目录。
+        self._device36 = _load_or_make_device36(token_file)
+        #: 会话 cookie（小程序存 Storage 的 `cookie._rab` / `cookie._vab`）
+        self._cookies: dict[str, str] = {}
 
     # ---------------- 会话 ----------------
 
@@ -181,24 +239,74 @@ class DektClient:
 
     # ---------------- 基础请求 ----------------
 
+    def _common_query(self) -> dict:
+        """小程序的公共查询参数：`_=<device36><毫秒时间戳>`（API.md §1）。"""
+        return {"_": f"{self._device36}{int(time.time() * 1000)}"}
+
     async def _get(self, path: str, params: Optional[dict] = None) -> dict:
+        """GET，**行为对齐小程序**：公共 `_` 参数、cookie 回传、失败重试。
+
+        重试口径（API.md §1）：非 2xx 或网络错误最多重试 2 次，每次追加
+        `_fly_retry=n` 并把超时 +2s（2s → 4s → 6s）。401 不重试 —— 那是
+        token 失效，再试一百次也一样。
+        """
         if not self.token:
             raise DektAuthError(
                 "缺少 token：把它放进 afterclass/token.txt、环境变量 DEKT_TOKEN，"
                 "或调用时传入")
-        session = await self._ensure_session()
-        query = dict(params or {})
-        # 小程序所有请求都带 `_=<时间戳>`（engine 还会插设备号，这里只给时间戳）
-        query.setdefault("_", str(int(time.time() * 1000)))
         url = f"{self.base}{path}"
-        async with session.get(url, params=query) as resp:
-            text = await resp.text()
-            real = resp.headers.get("x-real-status") or resp.status
+        last_error: Optional[Exception] = None
+        for attempt in range(GET_RETRIES + 1):
+            query = self._common_query()
+            query.update({k: v for k, v in (params or {}).items() if v != ""})
+            if attempt:
+                query["_fly_retry"] = str(attempt)
+            timeout = aiohttp.ClientTimeout(
+                total=GET_TIMEOUT + GET_TIMEOUT_STEP * attempt,
+                connect=GET_TIMEOUT)
+            session = await self._ensure_session()
             try:
-                payload = json.loads(text)
-            except json.JSONDecodeError:
-                payload = None
-            return _unwrap(payload, int(real) if str(real).isdigit() else resp.status)
+                async with session.get(url, params=query, cookies=self._cookies,
+                                       timeout=timeout) as resp:
+                    self._remember_cookies(resp)
+                    text = await resp.text()
+                    real = resp.headers.get("x-real-status") or resp.status
+                    try:
+                        payload = json.loads(text)
+                    except json.JSONDecodeError:
+                        payload = None
+                    return _unwrap(
+                        payload,
+                        int(real) if str(real).isdigit() else resp.status)
+            except DektAuthError:
+                raise                        # 401 不重试
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                last_error = e
+                if attempt < GET_RETRIES:
+                    if self.logger:
+                        self.logger.info(
+                            "[bupt_news] 第二课堂 GET 失败（%s），第 %d/%d 次重试",
+                            type(e).__name__, attempt + 1, GET_RETRIES)
+                    await asyncio.sleep(0.3 * (attempt + 1))
+                    continue
+                raise DektError(f"{type(e).__name__}: {e}") from e
+            except DektError as e:
+                # 服务端 5xx：与网络错误同样处理（重试），4xx 直接抛
+                last_error = e
+                if attempt < GET_RETRIES and _retryable(e):
+                    continue
+                raise
+        raise DektError(str(last_error or "请求失败"))
+
+    def _remember_cookies(self, resp) -> None:
+        """记下小程序会存 Storage 的那两个 cookie（`_rab` / `_vab`）。"""
+        try:
+            for key in ("_rab", "_vab"):
+                value = resp.cookies.get(key)
+                if value is not None:
+                    self._cookies[key] = value.value
+        except Exception:                    # noqa: BLE001 - cookie 不该影响主流程
+            pass
 
     # ---------------- 业务接口 ----------------
 
@@ -246,11 +354,101 @@ class DektClient:
             out.append(rec)
         return out
 
+    async def fetch_activities(self, user: dict, *, digest: Any = "",
+                               classes: Optional[dict] = None) -> list[dict]:
+        """**按官方小程序的顺序**把活动扒下来（用户要求"模仿官方 app 的行为"）。
+
+        小程序的初始化顺序（final_draft §4.2 / API.md §5）：
+
+        1. `activity/class` 拿分类（全局状态里缓存）；
+        2. `activity?is_group=0` 拿**普通活动**；
+        3. `activity?is_group=1` 拿**组织活动**（页面上切到对应分类时按需加载，
+           这里一次拉齐 —— 否则同步会漏掉组织活动）；
+        4. 两份合并、按 `id` 去重、再按小程序的默认排序输出。
+
+        参数口径与小程序一致：`college_id` / `class_id` / `grade` / `role_id`
+        取自 `GET /user/{sub}`，`digest` 用用户摘要（不带可能被拒）。
+        """
+        if classes is None:
+            classes = {str(c.get("id")): str(c.get("name") or "")
+                       for c in await self.activity_classes()}
+        #: 分类缓存（小程序也在全局状态里缓存 `activityClass`）
+        self.classes = dict(classes)
+        common = {
+            "digest": digest or "",
+            "college_id": user.get("college_id") or 0,
+            "class_id": user.get("class_id") or 0,
+            "grade": user.get("grade") or 0,
+            "role_id": user.get("role_id") or 0,
+        }
+        normal = await self.activities(**common, is_group=0)
+        group: list[dict] = []
+        try:
+            group = await self.activities(**common, is_group=1)
+        except DektError as e:
+            # 组织活动是"额外一份"，拉不到不该让整轮失败（小程序也是按需加载）
+            if self.logger:
+                self.logger.info("[bupt_news] 组织活动拉取失败（不影响普通活动）：%s", e)
+
+        merged: dict[str, dict] = {}
+        for is_group, acts in ((0, normal), (1, group)):
+            for act in acts:
+                key = activity_key(act)
+                if key in merged:
+                    continue
+                rec = dict(act)
+                rec["is_group"] = is_group
+                merged[key] = rec
+        if self.logger:
+            self.logger.info(
+                "[bupt_news] 活动拉取：普通 %d 条 / 组织 %d 条 → 去重后 %d 条",
+                len(normal), len(group), len(merged))
+        return app_sort(merged.values())
+
+
     async def activity(self, act_id: Any) -> dict:
         """活动详情。"""
         got = await self._get(f"{API_PREFIX}/activity/{int(act_id)}")
         data = got.get("data") or {}
         return data if isinstance(data, dict) else {}
+
+
+def app_sort(acts) -> list[dict]:
+    """官方小程序的默认排序（final_draft §4.2）。
+
+    报告只说了"结合活动优先级、开始时间、报名窗口和本地计算权重"，没有给权重
+    公式。这里用一条**可解释**的近似，顺序容易复盘：
+
+    1. `priority` 大的在前（服务端本身就是按它排的）；
+    2. 报名窗口**正开着**的在前（"现在能报"比"还没开"更急）；
+    3. 开始时间早的在前（同样的优先级，先发生的先看）；
+    4. 最后用 `id` 兜底，保证顺序稳定。
+
+    ⚠️ 这是近似，不是复刻；真实权重在客户端 `app-service.js` 里，报告未给。
+    """
+    now = time.time()
+
+    def _ts(value) -> float:
+        if not value:
+            return 0.0
+        try:
+            text = str(value).replace("Z", "+00:00")
+            from datetime import datetime
+            return datetime.fromisoformat(text).timestamp()
+        except ValueError:
+            return 0.0
+
+    def key(act: dict):
+        priority = int(act.get("priority") or 0)
+        open_now = 1
+        start = _ts(act.get("signup_start_time"))
+        end = _ts(act.get("signup_end_time"))
+        if start and end and not (start <= now <= end):
+            open_now = 0
+        return (-priority, -open_now, _ts(act.get("activity_start_time")) or 9e18,
+                str(activity_key(act)))
+
+    return sorted(list(acts), key=key)
 
 
 def activity_key(act: dict) -> str:

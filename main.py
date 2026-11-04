@@ -1714,13 +1714,9 @@ class BuptNewsPlugin(PluginBase):
 
         user = me.get("user") or {}
         try:
-            raw = await client.activities(
-                digest=me.get("digest") or "",
-                college_id=user.get("college_id") or 0,
-                class_id=user.get("class_id") or 0,
-                grade=user.get("grade") or 0,
-                role_id=user.get("role_id") or 0,
-            )
+            # 与官方小程序同一套拉取顺序：分类 → 普通活动 → 组织活动 → 合并排序
+            raw = await client.fetch_activities(
+                user, digest=me.get("digest") or "")
         except DektAuthError:
             self.logger.warning("[bupt_news] 绑定「%s」的 token 失效，跳过", name)
             await self._warn_token_invalid(binding, reason="拉取活动被拒")
@@ -1731,13 +1727,15 @@ class BuptNewsPlugin(PluginBase):
                                 name, e)
             return (0, 0, False)
 
-        classes: dict[str, str] = {}
-        try:
-            classes = {str(c.get("id")): str(c.get("name") or "")
-                       for c in await client.activity_classes()}
-        except Exception as e:  # noqa: BLE001 - 分类只影响展示
-            self.logger.warning("[bupt_news] 绑定「%s」拉分类失败（不影响同步）：%s",
-                                name, e)
+        # `fetch_activities()` 内部已经拉过分类并缓存，这里直接取用
+        classes: dict[str, str] = getattr(client, "classes", None) or {}
+        if not classes:
+            try:
+                classes = {str(c.get("id")): str(c.get("name") or "")
+                           for c in await client.activity_classes()}
+            except Exception as e:  # noqa: BLE001 - 分类只影响展示
+                self.logger.warning("[bupt_news] 绑定「%s」拉分类失败（不影响同步）：%s",
+                                    name, e)
 
         norms = [normalize_activity(a, classes) for a in raw]
         first_run = store.record_count == 0
