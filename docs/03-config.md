@@ -1,6 +1,6 @@
 # 三、配置
 
-> 文档索引：[docs/README.md](https://github.com/Green1423/ncqqpy/blob/main/docs/README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[运行前提](02-requirements.md) · 下一章：[命令](04-commands.md)
+> 文档索引：[docs/README.md](README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[运行前提](02-requirements.md) · 下一章：[命令](04-commands.md)
 
 
 ## 3.1 配置项

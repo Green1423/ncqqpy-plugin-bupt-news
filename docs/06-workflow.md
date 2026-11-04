@@ -1,6 +1,6 @@
 # 六、工作流程
 
-> 文档索引：[docs/README.md](https://github.com/Green1423/ncqqpy/blob/main/docs/README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[作用域（命令能在哪里用 / 影响什么）](05-scope.md) · 下一章：[已知限制](07-limitations.md)
+> 文档索引：[docs/README.md](README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[作用域（命令能在哪里用 / 影响什么）](05-scope.md) · 下一章：[已知限制](07-limitations.md)
 
 本文描述插件**对外表现出的行为**：什么时候同步、推送什么、哪些情况会延迟、出错时
 用户看到什么。配置项见 [配置](03-config.md)，命令用法见 [命令](04-commands.md)。

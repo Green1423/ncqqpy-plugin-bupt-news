@@ -1,6 +1,6 @@
 # 二、运行前提
 
-> 文档索引：[docs/README.md](https://github.com/Green1423/ncqqpy/blob/main/docs/README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[目录结构](01-layout.md) · 下一章：[配置](03-config.md)
+> 文档索引：[docs/README.md](README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[目录结构](01-layout.md) · 下一章：[配置](03-config.md)
 
 
 1. **NapCatQQ 必须已运行**，并开启了 WebSocket 服务端，地址与 `config.json` 的

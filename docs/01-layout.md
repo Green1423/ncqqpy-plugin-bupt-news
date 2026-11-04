@@ -1,6 +1,6 @@
 # 一、目录结构
 
-> 文档索引：[docs/README.md](https://github.com/Green1423/ncqqpy/blob/main/docs/README.md) · 上级：[bupt_news 插件](README.md) · 下一章：[运行前提](02-requirements.md)
+> 文档索引：[docs/README.md](README.md) · 上级：[bupt_news 插件](README.md) · 下一章：[运行前提](02-requirements.md)
 
 
 ## 1.1 插件目录

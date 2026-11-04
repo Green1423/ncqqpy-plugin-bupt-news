@@ -1,6 +1,6 @@
 # 九、与 Node 爬虫的关系
 
-> 文档索引：[docs/README.md](https://github.com/Green1423/ncqqpy/blob/main/docs/README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[排障](08-troubleshooting.md) · 下一章：[测试与自检](10-tests.md)
+> 文档索引：[docs/README.md](README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[排障](08-troubleshooting.md) · 下一章：[测试与自检](10-tests.md)
 
 
 另有一套**独立的离线批量爬取**工具（`crawl.js` / `login.js`，不在本仓库内，

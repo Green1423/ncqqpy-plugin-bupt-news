@@ -1,6 +1,6 @@
 # 四、命令
 
-> 文档索引：[docs/README.md](https://github.com/Green1423/ncqqpy/blob/main/docs/README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[配置](03-config.md) · 下一章：[作用域（命令能在哪里用 / 影响什么）](05-scope.md)
+> 文档索引：[docs/README.md](README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[配置](03-config.md) · 下一章：[作用域（命令能在哪里用 / 影响什么）](05-scope.md)
 
 
 ## 4.1 命令一览

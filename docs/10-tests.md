@@ -1,6 +1,6 @@
 # 十、测试与自检
 
-> 文档索引：[docs/README.md](https://github.com/Green1423/ncqqpy/blob/main/docs/README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[与 Node 爬虫的关系](09-node-crawler.md)
+> 文档索引：[docs/README.md](README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[与 Node 爬虫的关系](09-node-crawler.md)
 
 
 自检脚本与诊断探针都在 `tests/` 下（见 (01-layout.md#12-配套脚本与入口)）：

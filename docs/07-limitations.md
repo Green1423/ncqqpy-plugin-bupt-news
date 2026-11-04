@@ -1,6 +1,6 @@
 # 七、已知限制
 
-> 文档索引：[docs/README.md](https://github.com/Green1423/ncqqpy/blob/main/docs/README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[工作流程](06-workflow.md) · 下一章：[排障](08-troubleshooting.md)
+> 文档索引：[docs/README.md](README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[工作流程](06-workflow.md) · 下一章：[排障](08-troubleshooting.md)
 
 
 - **⚠️ DeepSeek 摘要是 best-effort**：偶发失败时该批降级为**标题截断**（不会丢通知），

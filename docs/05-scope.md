@@ -1,6 +1,6 @@
 # 五、作用域（命令能在哪里用 / 影响什么）
 
-> 文档索引：[docs/README.md](https://github.com/Green1423/ncqqpy/blob/main/docs/README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[命令](04-commands.md) · 下一章：[工作流程](06-workflow.md)
+> 文档索引：[docs/README.md](README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[命令](04-commands.md) · 下一章：[工作流程](06-workflow.md)
 
 
 「作用域」在本项目里有三层，含义完全不同：

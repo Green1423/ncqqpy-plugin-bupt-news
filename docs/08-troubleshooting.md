@@ -1,6 +1,6 @@
 # 八、排障
 
-> 文档索引：[docs/README.md](https://github.com/Green1423/ncqqpy/blob/main/docs/README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[已知限制](07-limitations.md) · 下一章：[与 Node 爬虫的关系](09-node-crawler.md)
+> 文档索引：[docs/README.md](README.md) · 上级：[bupt_news 插件](README.md) · 上一章：[已知限制](07-limitations.md) · 下一章：[与 Node 爬虫的关系](09-node-crawler.md)
 
 
 ## 8.1 WebSocket 连不上：先看异常类型
